@@ -32,7 +32,7 @@ Built by FairTech.
 The app runs seamlessly in the background and is accessible via your System Tray. Double click the Wave Link Hotkey Manager icon in your tray to open the configuration dashboard, or right-click for quick options for disabling the OSD and Hotkeys globally.
 
 ## Credits, Acknowledgments, & Disclaimers
-Credits to the creator of the **`node-wave-link-sdk`** ([@darrellvs](https://github.com/darrellvs))
+Credits to the creator of the [node-wave-link-sdk](https://github.com/DarrellVS/node-wave-link-sdk), ([@darrellvs](https://github.com/darrellvs))
 This tool would have been a lot more effort to make if not for this library!
 
 This utility is not affiliated with, endorsed by, or sponsored by Elgato or Corsair. Elgato and Wave Link are trademarks of their respective owners. I just don't like how they lock down their ecosystem. (But opening Wave Link software for any mic is a HUGE step in the right direction! Thanks Elgato!)
