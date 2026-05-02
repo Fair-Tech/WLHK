@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wave Link Hotkey Manager</title>
+    <style>
+        :root {
+            --bg-color: #f3f3f3;
+            --text-color: #202020;
+            --card-bg: #ffffff;
+            --border-color: #e5e5e5;
+            --primary: #0078D4;
+            --danger: #d13438;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg-color: #202020;
+                --text-color: #ffffff;
+                --card-bg: #2d2d2d;
+                --border-color: #3d3d3d;
+            }
+        }
+
+        body {
+            font-family: 'Segoe UI Variable Display', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            margin: 0;
+            padding: 24px;
+        }
+
+        h1 {
+            font-weight: 600;
+            margin-top: 0;
+            text-align: center;
+        }
+
+        .container {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+
+        .card {
+            background-color: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 16px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+            margin-bottom: 16px;
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 12px;
+            margin-bottom: 16px;
+        }
+
+        .card-header h2 {
+            margin: 0;
+            font-size: 18px;
+            color: var(--primary);
+        }
+
+        .trigger-section {
+            display: flex;
+            align-items: flex-start;
+            gap: 16px;
+            margin-bottom: 16px;
+            padding: 12px;
+            background-color: var(--bg-color);
+            border-radius: 6px;
+        }
+
+        .trigger-header {
+            width: 120px;
+            flex-shrink: 0;
+        }
+
+        .trigger-header label {
+            font-weight: 600;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .trigger-body {
+            flex-grow: 1;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            align-items: center;
+        }
+
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .form-group label {
+            font-size: 12px;
+            font-weight: 600;
+            opacity: 0.8;
+        }
+
+        select,
+        input[type="number"],
+        input[type="text"] {
+            padding: 6px 10px;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            background-color: var(--card-bg);
+            color: var(--text-color);
+            font-family: inherit;
+        }
+
+        button {
+            background-color: var(--primary);
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: background-color 0.2s;
+        }
+
+        button:hover {
+            background-color: #006abc;
+        }
+
+        button.danger {
+            background-color: var(--danger);
+        }
+
+        button.danger:hover {
+            background-color: #a82a2d;
+        }
+
+        #btn-add-hotkey {
+            font-size: 16px;
+            padding: 12px 24px;
+            width: 100%;
+        }
+
+        .recording-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            justify-content: center;
+            align-items: center;
+            font-size: 24px;
+            font-weight: bold;
+            z-index: 1000;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Wave Link Hotkey Manager</h1>
+
+    <div class="container">
+        <div class="card">
+            <div class="card-header">
+                <h2>Global Settings</h2>
+            </div>
+            <div class="trigger-body" style="padding-top: 10px;">
+                <div class="form-group" style="flex-direction: row; align-items: center; gap: 8px;">
+                    <input type="checkbox" id="hotkeys-enabled" checked>
+                    <label for="hotkeys-enabled" style="font-size: 14px; opacity: 1;">Enable Hotkeys</label>
+                </div>
+                <div class="form-group" style="flex-direction: row; align-items: center; gap: 8px; margin-left: 16px;">
+                    <input type="checkbox" id="osd-enabled" checked>
+                    <label for="osd-enabled" style="font-size: 14px; opacity: 1;">Enable OSD</label>
+                </div>
+                <div class="form-group" style="margin-left: 16px;">
+                    <label>OSD Position</label>
+                    <select id="osd-position">
+                        <option value="top-left">Top Left</option>
+                        <option value="top-center">Top Center</option>
+                        <option value="top-right">Top Right</option>
+                        <option value="left-center">Left Center</option>
+                        <option value="center">Center</option>
+                        <option value="right-center">Right Center</option>
+                        <option value="bottom-left">Bottom Left</option>
+                        <option value="bottom-center">Bottom Center</option>
+                        <option value="bottom-right">Bottom Right</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+
+        <button id="btn-add-hotkey">+ Record New Hotkey</button>
+        <div id="hotkey-list"></div>
+
+        <div style="text-align: center; margin-top: 32px; margin-bottom: 16px; opacity: 0.6; cursor: pointer; transition: opacity 0.2s;" id="fairtech-logo" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.6">
+            <img src="../../assets/FairTech.png" alt="FairTech Logo" style="height: 32px; vertical-align: middle; margin-right: 8px;">
+            <span style="font-size: 14px; font-weight: 600; vertical-align: middle;">Powered by FairTech</span>
+        </div>
+    </div>
+
+    <div class="recording-overlay" id="recording-overlay">
+        Listening for Keystroke...
+    </div>
+
+    <script>
+        const { ipcRenderer, shell } = require('electron');
+
+        document.getElementById('fairtech-logo').addEventListener('click', () => {
+            shell.openExternal('https://FairTech.app');
+        });
+
+        let channels = [];
+        let outputDevices = [];
+        let config = { hotkeys: {} };
+
+        // Request initial data
+        ipcRenderer.send('request-data');
+
+        ipcRenderer.on('wave-data', (e, data) => {
+            channels = data.channels || [];
+            outputDevices = data.outputDevices || [];
+            renderHotkeyList();
+        });
+
+        ipcRenderer.on('config-data', (e, data) => {
+            config = data;
+            if (!config.hotkeys) config.hotkeys = {};
+            
+            const osdSelect = document.getElementById('osd-position');
+            osdSelect.value = config.osdPosition || 'bottom-right';
+
+            const hkEnabledCheck = document.getElementById('hotkeys-enabled');
+            hkEnabledCheck.checked = config.hotkeysEnabled !== false;
+
+            const osdEnabledCheck = document.getElementById('osd-enabled');
+            osdEnabledCheck.checked = config.osdEnabled !== false;
+            
+            renderHotkeyList();
+        });
+
+        document.getElementById('osd-position').addEventListener('change', (e) => {
+            config.osdPosition = e.target.value;
+            saveConfig();
+        });
+
+        document.getElementById('hotkeys-enabled').addEventListener('change', (e) => {
+            config.hotkeysEnabled = e.target.checked;
+            saveConfig();
+        });
+
+        document.getElementById('osd-enabled').addEventListener('change', (e) => {
+            config.osdEnabled = e.target.checked;
+            saveConfig();
+        });
+
+        const btnAddHotkey = document.getElementById('btn-add-hotkey');
+        const recordingOverlay = document.getElementById('recording-overlay');
+
+        btnAddHotkey.addEventListener('click', () => {
+            recordingOverlay.style.display = 'flex';
+            ipcRenderer.send('start-recording');
+        });
+
+        ipcRenderer.on('recording-result', (e, combo) => {
+            recordingOverlay.style.display = 'none';
+            if (!config.hotkeys[combo]) {
+                config.hotkeys[combo] = {};
+                saveConfig();
+            }
+        });
+
+        function saveConfig() {
+            ipcRenderer.send('save-config', config);
+            renderHotkeyList();
+        }
+
+        function createOptions(items, selectedId) {
+            return items.map(item => `<option value="${item.id}" ${item.id === selectedId ? 'selected' : ''}>${item.name}</option>`).join('');
+        }
+
+        function renderTriggerSection(key, triggerKey, triggerLabel, data) {
+            const isEnabled = !!data;
+            const actionType = data?.type || 'mute_channel';
+
+            // Build target options depending on action
+            let targetGroupHTML = '';
+
+            if (isEnabled) {
+                if (actionType.includes('channel')) {
+                    const targetId = data?.channelId || (channels[0]?.id || '');
+                    targetGroupHTML = `
+                        <div class="form-group">
+                            <label>Target Channel</label>
+                            <select class="action-target-1" data-key="${key}" data-trigger="${triggerKey}">
+                                ${createOptions(channels, targetId)}
+                            </select>
+                        </div>
+                    `;
+                } else if (actionType === 'switch_output') {
+                    const targetId = data?.deviceId || (outputDevices[0]?.id || '');
+                    targetGroupHTML = `
+                        <div class="form-group">
+                            <label>Target Output</label>
+                            <select class="action-target-1" data-key="${key}" data-trigger="${triggerKey}">
+                                ${createOptions(outputDevices, targetId)}
+                            </select>
+                        </div>
+                    `;
+                } else if (actionType === 'cycle_output') {
+                    const targetId1 = data?.deviceIds?.[0] || (outputDevices[0]?.id || '');
+                    const targetId2 = data?.deviceIds?.[1] || (outputDevices[1]?.id || (outputDevices[0]?.id || ''));
+                    targetGroupHTML = `
+                        <div class="form-group">
+                            <label>Target 1</label>
+                            <select class="action-target-1" data-key="${key}" data-trigger="${triggerKey}">
+                                ${createOptions(outputDevices, targetId1)}
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Target 2</label>
+                            <select class="action-target-2" data-key="${key}" data-trigger="${triggerKey}">
+                                ${createOptions(outputDevices, targetId2)}
+                            </select>
+                        </div>
+                    `;
+                }
+            }
+
+            let holdDurationHTML = '';
+            if (isEnabled && triggerKey === 'holdAction') {
+                const duration = data?.duration || 500;
+                holdDurationHTML = `
+                    <div class="form-group">
+                        <label>Hold Time (ms)</label>
+                        <input type="number" class="action-duration" data-key="${key}" data-trigger="${triggerKey}" value="${duration}" min="100" max="5000" step="50" style="width: 80px;">
+                    </div>
+                `;
+            }
+
+            return `
+                <div class="trigger-section" style="${isEnabled ? 'border-left: 3px solid var(--primary);' : 'opacity: 0.6;'}">
+                    <div class="trigger-header">
+                        <label>
+                            <input type="checkbox" class="trigger-enable" data-key="${key}" data-trigger="${triggerKey}" ${isEnabled ? 'checked' : ''}>
+                            ${triggerLabel}
+                        </label>
+                    </div>
+                    ${isEnabled ? `
+                    <div class="trigger-body">
+                        <div class="form-group">
+                            <label>Action</label>
+                            <select class="action-type" data-key="${key}" data-trigger="${triggerKey}">
+                                <option value="mute_channel" ${actionType === 'mute_channel' ? 'selected' : ''}>Toggle Mute</option>
+                                <option value="volume_up_channel" ${actionType === 'volume_up_channel' ? 'selected' : ''}>Volume Up</option>
+                                <option value="volume_down_channel" ${actionType === 'volume_down_channel' ? 'selected' : ''}>Volume Down</option>
+                                <option value="switch_output" ${actionType === 'switch_output' ? 'selected' : ''}>Switch Output Device</option>
+                                <option value="cycle_output" ${actionType === 'cycle_output' ? 'selected' : ''}>Cycle Output Devices</option>
+                            </select>
+                        </div>
+                        ${targetGroupHTML}
+                        ${holdDurationHTML}
+                    </div>
+                    ` : '<div class="trigger-body"><span style="font-size: 12px; opacity: 0.5; font-style: italic;">Disabled</span></div>'}
+                </div>
+            `;
+        }
+
+        function renderHotkeyList() {
+            const list = document.getElementById('hotkey-list');
+            list.innerHTML = '';
+
+            for (const key in config.hotkeys) {
+                const keyConfig = config.hotkeys[key] || {};
+
+                const card = document.createElement('div');
+                card.className = 'card';
+                card.innerHTML = `
+                    <div class="card-header">
+                        <h2>${key}</h2>
+                        <button class="danger btn-delete-key" data-key="${key}">Delete Hotkey</button>
+                    </div>
+                    ${renderTriggerSection(key, 'normalAction', 'Normal Press', keyConfig.normalAction)}
+                    ${renderTriggerSection(key, 'holdAction', 'Hold', keyConfig.holdAction)}
+                    ${renderTriggerSection(key, 'doublePressAction', 'Double Press', keyConfig.doublePressAction)}
+                `;
+                list.appendChild(card);
+            }
+
+            attachEventListeners();
+        }
+
+        function attachEventListeners() {
+            document.querySelectorAll('.btn-delete-key').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    const key = e.target.dataset.key;
+                    if (confirm(`Delete hotkey ${key}?`)) {
+                        delete config.hotkeys[key];
+                        saveConfig();
+                    }
+                });
+            });
+
+            document.querySelectorAll('.trigger-enable').forEach(cb => {
+                cb.addEventListener('change', (e) => {
+                    const key = e.target.dataset.key;
+                    const trigger = e.target.dataset.trigger;
+                    if (e.target.checked) {
+                        config.hotkeys[key][trigger] = { type: 'mute_channel' };
+                    } else {
+                        delete config.hotkeys[key][trigger];
+                    }
+                    saveConfig();
+                });
+            });
+
+            document.querySelectorAll('.action-type').forEach(select => {
+                select.addEventListener('change', (e) => {
+                    const key = e.target.dataset.key;
+                    const trigger = e.target.dataset.trigger;
+                    config.hotkeys[key][trigger].type = e.target.value;
+                    saveConfig(); // re-renders to show correct target dropdowns
+                });
+            });
+
+            // Target dropdowns and duration input (listen to change)
+            document.querySelectorAll('.action-target-1, .action-target-2, .action-duration').forEach(el => {
+                el.addEventListener('change', (e) => {
+                    const key = e.target.dataset.key;
+                    const trigger = e.target.dataset.trigger;
+                    const actionConfig = config.hotkeys[key][trigger];
+                    const actionType = actionConfig.type;
+
+                    const card = e.target.closest('.trigger-body');
+
+                    if (e.target.classList.contains('action-duration')) {
+                        actionConfig.duration = parseInt(e.target.value, 10);
+                    } else {
+                        const target1 = card.querySelector('.action-target-1')?.value;
+                        const target2 = card.querySelector('.action-target-2')?.value;
+
+                        if (actionType === 'cycle_output') {
+                            actionConfig.deviceIds = [target1, target2];
+                        } else if (actionType.includes('output')) {
+                            actionConfig.deviceId = target1;
+                            delete actionConfig.channelId;
+                        } else {
+                            actionConfig.channelId = target1;
+                            delete actionConfig.deviceId;
+                        }
+                    }
+                    // Silent save to avoid losing focus if they are typing in number input
+                    ipcRenderer.send('save-config', config);
+                });
+            });
+        }
+    </script>
+</body>
+
+</html>

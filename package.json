@@ -1,0 +1,43 @@
+{
+  "name": "wavelinknode",
+  "version": "1.0.0",
+  "description": "Custom global hotkey manager for Elgato Wave Link.",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "build:installer": "electron-builder --win nsis",
+    "build:portable": "electron-builder --win portable"
+  },
+  "keywords": [],
+  "author": "FairTech",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@darrellvs/node-wave-link-sdk": "file:../node-wave-link-sdk",
+    "node-global-key-listener": "^0.3.0"
+  },
+  "devDependencies": {
+    "electron": "^41.5.0",
+    "electron-builder": "^26.8.1"
+  },
+  "build": {
+    "appId": "app.fairtech.wavelinkhotkey",
+    "productName": "Wave Link Hotkey Manager",
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": "nsis",
+      "icon": "assets/FairTech.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  },
+  "devDependencies": {
+    "electron-builder": "^26.8.1"
+  }
+}
