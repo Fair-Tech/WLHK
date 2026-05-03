@@ -52,7 +52,7 @@ function loadConfig() {
   } catch (e) {
     console.error("Failed to load config", e);
   }
-  
+
   if (config.hotkeysEnabled === undefined) config.hotkeysEnabled = true;
   if (config.osdEnabled === undefined) config.osdEnabled = true;
 }
@@ -80,7 +80,7 @@ app.on('ready', async () => {
   }
 
   updateContextMenu();
-  
+
   tray.on('double-click', openConfigWindow);
 
   // Initialize WaveLink Controller
@@ -97,19 +97,23 @@ function updateContextMenu() {
   const contextMenu = Menu.buildFromTemplate([
     { label: 'Configure Hotkeys', click: openConfigWindow },
     { type: 'separator' },
-    { label: config.hotkeysEnabled ? 'Disable Hotkeys' : 'Enable Hotkeys', click: () => {
+    {
+      label: config.hotkeysEnabled ? 'Disable Hotkeys' : 'Enable Hotkeys', click: () => {
         config.hotkeysEnabled = !config.hotkeysEnabled;
         saveConfig();
         if (hotkeyManager) hotkeyManager.enabled = config.hotkeysEnabled;
         updateContextMenu();
         if (configWindow) configWindow.webContents.send('config-data', config);
-    }},
-    { label: config.osdEnabled ? 'Disable OSD' : 'Enable OSD', click: () => {
+      }
+    },
+    {
+      label: config.osdEnabled ? 'Disable OSD' : 'Enable OSD', click: () => {
         config.osdEnabled = !config.osdEnabled;
         saveConfig();
         updateContextMenu();
         if (configWindow) configWindow.webContents.send('config-data', config);
-    }},
+      }
+    },
     { type: 'separator' },
     { label: 'Quit', click: () => app.quit() }
   ]);
@@ -209,7 +213,7 @@ function openConfigWindow() {
     width: 800,
     height: 600,
     title: "Wave Link Hotkey Manager",
-    icon: nativeImage.createFromPath(path.join(__dirname, '../assets/WLHK.png')),
+    icon: nativeImage.createFromPath(path.join(__dirname, '../assets/WLHK.ico')),
     autoHideMenuBar: true,
     webPreferences: {
       nodeIntegration: true,

@@ -28,7 +28,7 @@
     },
     "win": {
       "target": "nsis",
-      "icon": "assets/FairTech.png"
+      "icon": "assets/WLHK.ico"
     },
     "nsis": {
       "oneClick": false,

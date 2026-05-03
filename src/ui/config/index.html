@@ -208,9 +208,11 @@
         <button id="btn-add-hotkey">+ Record New Hotkey</button>
         <div id="hotkey-list"></div>
 
-        <div style="text-align: center; margin-top: 32px; margin-bottom: 16px; opacity: 0.6; cursor: pointer; transition: opacity 0.2s;" id="fairtech-logo" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.6">
-            <img src="../../assets/FairTech.png" alt="FairTech Logo" style="height: 32px; vertical-align: middle; margin-right: 8px;">
-            <span style="font-size: 14px; font-weight: 600; vertical-align: middle;">Powered by FairTech</span>
+        <div style="text-align: center; margin-top: 32px; margin-bottom: 16px; opacity: 0.6; cursor: pointer; transition: opacity 0.2s;"
+            id="fairtech-logo" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.6">
+            <img src="../../../assets/FairTech.png" alt="FairTech Logo"
+                style="height: 32px; vertical-align: middle; margin-right: 8px;">
+            <span style="font-size: 14px; font-weight: 600; vertical-align: middle;">Built by FairTech</span>
         </div>
     </div>
 
@@ -241,7 +243,7 @@
         ipcRenderer.on('config-data', (e, data) => {
             config = data;
             if (!config.hotkeys) config.hotkeys = {};
-            
+
             const osdSelect = document.getElementById('osd-position');
             osdSelect.value = config.osdPosition || 'bottom-right';
 
@@ -250,7 +252,7 @@
 
             const osdEnabledCheck = document.getElementById('osd-enabled');
             osdEnabledCheck.checked = config.osdEnabled !== false;
-            
+
             renderHotkeyList();
         });
 
