@@ -1,6 +1,7 @@
-const { app, Tray, Menu, BrowserWindow, ipcMain, nativeImage, screen } = require('electron');
+const { app, Tray, Menu, BrowserWindow, ipcMain, nativeImage, screen, powerMonitor, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const { exec } = require('child_process');
 const { WaveLinkController } = require('@darrellvs/node-wave-link-sdk');
 const { GlobalKeyboardListener } = require('node-global-key-listener');
 const { HotkeyManager, getComboString } = require('./hotkeys');
@@ -10,11 +11,17 @@ let osdWindow = null;
 let configWindow = null;
 
 // The central wave link state controller
-const wlController = new WaveLinkController();
+let wlController = null;
 
 // Hotkey Manager reference
-// Hotkey Manager reference
 let hotkeyManager = null;
+
+// Connection state
+let wlConnected = false;
+let wlConnecting = false;
+let wlRetryCount = 0;
+const WL_MAX_RETRIES = 5;
+const WL_RETRY_DELAY_MS = 3000;
 
 // Config
 const configPath = path.join(app.getPath('userData'), 'config.json');
@@ -26,7 +33,6 @@ if (!gotTheLock) {
   process.exit(0);
 } else {
   app.on('second-instance', (event, commandLine, workingDirectory) => {
-    // Someone tried to run a second instance, we should focus our window.
     if (configWindow) {
       if (configWindow.isMinimized()) configWindow.restore();
       configWindow.focus();
@@ -39,14 +45,7 @@ function loadConfig() {
     if (fs.existsSync(configPath)) {
       config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
     } else {
-      // Default dummy config for testing
-      config = {
-        hotkeys: {
-          "F13": {
-            normalAction: { type: "mute_channel", channelId: "some-id" }
-          }
-        }
-      };
+      config = { hotkeys: {} };
       saveConfig();
     }
   } catch (e) {
@@ -55,46 +54,182 @@ function loadConfig() {
 
   if (config.hotkeysEnabled === undefined) config.hotkeysEnabled = true;
   if (config.osdEnabled === undefined) config.osdEnabled = true;
+  if (config.autoElevate === undefined) config.autoElevate = false;
+  if (config.startWithWindows === undefined) config.startWithWindows = false;
 }
 
 function saveConfig() {
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
 }
 
+function applyLoginItemSettings() {
+  // app.setLoginItemSettings writes to HKCU\Software\Microsoft\Windows\CurrentVersion\Run
+  // which is what Task Manager's Startup tab reads.
+  app.setLoginItemSettings({
+    openAtLogin: config.startWithWindows === true,
+    name: 'Wave Link Hotkey Manager'
+  });
+}
+
+// ─── Admin Elevation ──────────────────────────────────────────────────────────
+
+function isRunningAsAdmin() {
+  try {
+    // On Windows, try to open a privileged resource. If it fails, we're not admin.
+    require('child_process').execSync('net session', { stdio: 'ignore' });
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+function relaunchAsAdmin() {
+  const exePath = process.execPath;
+  const args = process.argv.slice(1).join(' ');
+  exec(`powershell -Command "Start-Process '${exePath}' -ArgumentList '${args}' -Verb RunAs"`, (err) => {
+    if (!err) app.quit();
+  });
+}
+
+// ─── Wave Link Connection ─────────────────────────────────────────────────────
+
+function createWLController() {
+  if (wlController) {
+    try { wlController.removeAllListeners(); } catch (_) {}
+  }
+  wlController = new WaveLinkController();
+
+  wlController.on('ready', () => {
+    console.log('Connected to Wave Link.');
+    wlConnected = true;
+    wlConnecting = false;
+    wlRetryCount = 0;
+    broadcastConnectionStatus();
+    broadcastWaveData();
+    updateContextMenu();
+    // Re-attach hotkey manager with fresh controller
+    setupHotkeys();
+  });
+
+  wlController.on('disconnected', () => {
+    console.log('Disconnected from Wave Link.');
+    wlConnected = false;
+    wlConnecting = false;
+    broadcastConnectionStatus();
+    updateContextMenu();
+    // Schedule a silent reconnect attempt
+    scheduleReconnect(WL_RETRY_DELAY_MS);
+  });
+
+  wlController.on('channelsChanged', broadcastWaveData);
+  wlController.on('outputDevicesChanged', broadcastWaveData);
+}
+
+function connectWaveLink() {
+  if (wlConnecting || wlConnected) return;
+  wlConnecting = true;
+  console.log(`Wave Link connect attempt ${wlRetryCount + 1}/${WL_MAX_RETRIES}...`);
+  createWLController();
+  wlController.connect();
+}
+
+function scheduleReconnect(delayMs) {
+  if (wlConnected || wlConnecting) return;
+  setTimeout(() => {
+    if (wlConnected || wlConnecting) return;
+    wlRetryCount++;
+    if (wlRetryCount <= WL_MAX_RETRIES) {
+      connectWaveLink();
+    } else {
+      // Give up — notify user
+      console.warn('Wave Link: Max retries reached. Showing notification.');
+      if (tray) {
+        tray.displayBalloon({
+          iconType: 'warning',
+          title: 'Wave Link Hotkey Manager',
+          content: 'Could not connect to Wave Link. Make sure Wave Link is running, then click "Reconnect to Wave Link" in the tray menu.'
+        });
+      }
+      broadcastConnectionStatus();
+      updateContextMenu();
+    }
+  }, delayMs);
+}
+
+function manualReconnect() {
+  wlConnected = false;
+  wlConnecting = false;
+  wlRetryCount = 0;
+  connectWaveLink();
+  broadcastConnectionStatus();
+  updateContextMenu();
+}
+
+function broadcastConnectionStatus() {
+  if (configWindow) {
+    configWindow.webContents.send('connection-status', { connected: wlConnected });
+  }
+}
+
+function broadcastWaveData() {
+  if (configWindow) {
+    configWindow.webContents.send('wave-data', {
+      channels: wlController ? wlController.getChannels() : [],
+      outputDevices: wlController ? wlController.getOutputDevices() : []
+    });
+  }
+}
+
+// ─── App Ready ────────────────────────────────────────────────────────────────
+
 app.on('ready', async () => {
   loadConfig();
-  // Hide the dock icon on macOS (no-op on Windows, but good practice)
+  applyLoginItemSettings();
+
+  // Auto-elevation check (Windows only)
+  if (process.platform === 'win32' && config.autoElevate && !isRunningAsAdmin()) {
+    relaunchAsAdmin();
+    return;
+  }
+
   if (app.dock) app.dock.hide();
 
-  // Create Tray
-  // We need an icon. For now, use a native placeholder or blank icon.
-  // NativeImage.createEmpty() could be used but we'll try to load a blank or default icon later.
   const iconPath = path.join(__dirname, '../assets/WLHK.ico');
-  // We'll create a dummy icon or tell the user to put one.
-
   try {
     tray = new Tray(iconPath);
   } catch (e) {
-    // Fallback if icon missing
-    tray = new Tray(require('electron').nativeImage.createEmpty());
+    tray = new Tray(nativeImage.createEmpty());
   }
 
   updateContextMenu();
-
   tray.on('double-click', openConfigWindow);
 
-  // Initialize WaveLink Controller
-  setupWaveLink();
+  // Start connecting to Wave Link with retry logic
+  connectWaveLink();
+  // If not connected in first 3s, retry in background
+  scheduleReconnect(WL_RETRY_DELAY_MS);
 
-  // Initialize OSD Window
   setupOSDWindow();
-
-  // Initialize Hotkeys
   setupHotkeys();
+
+  // Reconnect after system wake from sleep
+  powerMonitor.on('resume', () => {
+    console.log('System resumed from sleep. Reconnecting to Wave Link...');
+    wlRetryCount = 0;
+    wlConnected = false;
+    wlConnecting = false;
+    connectWaveLink();
+  });
 });
 
+// ─── Tray Context Menu ────────────────────────────────────────────────────────
+
 function updateContextMenu() {
+  const statusLabel = wlConnected ? '✓ Wave Link Connected' : '✗ Wave Link Disconnected';
   const contextMenu = Menu.buildFromTemplate([
+    { label: statusLabel, enabled: false },
+    { label: 'Reconnect to Wave Link', click: manualReconnect },
+    { type: 'separator' },
     { label: 'Configure Hotkeys', click: openConfigWindow },
     { type: 'separator' },
     {
@@ -121,30 +256,7 @@ function updateContextMenu() {
   tray.setContextMenu(contextMenu);
 }
 
-function setupWaveLink() {
-  wlController.on('ready', () => {
-    console.log('Connected to Wave Link 3.1+');
-    broadcastWaveData();
-  });
-
-  wlController.on('disconnected', () => {
-    console.log('Disconnected from Wave Link');
-  });
-
-  wlController.on('channelsChanged', broadcastWaveData);
-  wlController.on('outputDevicesChanged', broadcastWaveData);
-
-  wlController.connect();
-}
-
-function broadcastWaveData() {
-  if (configWindow) {
-    configWindow.webContents.send('wave-data', {
-      channels: wlController.getChannels(),
-      outputDevices: wlController.getOutputDevices()
-    });
-  }
-}
+// ─── OSD ──────────────────────────────────────────────────────────────────────
 
 function setupOSDWindow() {
   osdWindow = new BrowserWindow({
@@ -154,7 +266,7 @@ function setupOSDWindow() {
     transparent: true,
     alwaysOnTop: true,
     skipTaskbar: true,
-    show: false, // suspended until needed
+    show: false,
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false
@@ -178,11 +290,11 @@ function positionOSD() {
 
   if (osdPos.includes('right')) x += workArea.width - bounds.width - padding;
   else if (osdPos.includes('left')) x += padding;
-  else x += Math.round((workArea.width - bounds.width) / 2); // center
+  else x += Math.round((workArea.width - bounds.width) / 2);
 
   if (osdPos.includes('bottom')) y += workArea.height - bounds.height - padding;
   else if (osdPos.includes('top')) y += padding;
-  else y += Math.round((workArea.height - bounds.height) / 2); // center
+  else y += Math.round((workArea.height - bounds.height) / 2);
 
   osdWindow.setBounds({ x, y, width: bounds.width, height: bounds.height });
 }
@@ -194,15 +306,16 @@ function showOSD(title, value, type = 'text') {
   osdWindow.webContents.send('show-osd', { title, value, type });
   osdWindow.showInactive();
 
-  // Auto-hide after 2s
   if (osdWindow.hideTimeout) clearTimeout(osdWindow.hideTimeout);
   osdWindow.hideTimeout = setTimeout(() => {
     osdWindow.webContents.send('hide-osd');
     setTimeout(() => {
       if (osdWindow) osdWindow.hide();
-    }, 250); // wait for fade out animation
+    }, 250);
   }, 2000);
 }
+
+// ─── Config Window ────────────────────────────────────────────────────────────
 
 function openConfigWindow() {
   if (configWindow) {
@@ -227,23 +340,36 @@ function openConfigWindow() {
   });
 }
 
-// IPC Handlers
+// ─── IPC Handlers ─────────────────────────────────────────────────────────────
+
 ipcMain.on('request-data', (event) => {
   event.reply('config-data', config);
   event.reply('wave-data', {
-    channels: wlController.getChannels(),
-    outputDevices: wlController.getOutputDevices()
+    channels: wlController ? wlController.getChannels() : [],
+    outputDevices: wlController ? wlController.getOutputDevices() : []
   });
+  event.reply('connection-status', { connected: wlConnected });
+  event.reply('admin-status', { isAdmin: isRunningAsAdmin() });
 });
 
 ipcMain.on('save-config', (event, newConfig) => {
   config = newConfig;
   saveConfig();
+  applyLoginItemSettings();
   event.reply('config-data', config);
   updateContextMenu();
-  // Re-init hotkey manager with new config
   setupHotkeys();
 });
+
+ipcMain.on('manual-reconnect', () => {
+  manualReconnect();
+});
+
+ipcMain.on('relaunch-as-admin', () => {
+  relaunchAsAdmin();
+});
+
+// ─── Hotkey Recording ─────────────────────────────────────────────────────────
 
 let isRecording = false;
 let recordingListener = null;
@@ -256,28 +382,36 @@ ipcMain.on('start-recording', (event) => {
   recordingListener.addListener((e, down) => {
     if (e.state === 'DOWN' || e.state === 'UP') {
       const combo = getComboString(e, down);
-      if (combo) { // it's not just a standalone modifier
+      if (combo) {
         event.reply('recording-result', combo);
         isRecording = false;
         recordingListener.kill();
         recordingListener = null;
-        return true; // Block the action while recording
+        return true;
       }
     }
     return false;
   });
 });
 
+// ─── Hotkeys ──────────────────────────────────────────────────────────────────
+
 function setupHotkeys() {
   if (hotkeyManager) {
-    // If re-initializing, kill the old listener to avoid double triggers
-    hotkeyManager.listener.kill();
+    try { hotkeyManager.listener.kill(); } catch (_) {}
+    hotkeyManager = null;
   }
-  hotkeyManager = new HotkeyManager(wlController, config, showOSD);
-  hotkeyManager.enabled = config.hotkeysEnabled;
+  // Short delay to allow the listener server to fully exit before spawning a new one.
+  // This fixes the "unresponsive dropdown after delete+add" bug.
+  setTimeout(() => {
+    if (!wlController) return;
+    hotkeyManager = new HotkeyManager(wlController, config, showOSD);
+    hotkeyManager.enabled = config.hotkeysEnabled;
+  }, 200);
 }
 
-// Ensure app stays open even if all windows closed
+// ─── Lifecycle ────────────────────────────────────────────────────────────────
+
 app.on('window-all-closed', (e) => {
   e.preventDefault();
 });

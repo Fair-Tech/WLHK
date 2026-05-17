@@ -14,6 +14,16 @@ if %errorLevel% == 0 (
 :build
 cd /d "%~dp0"
 echo ========================================================
+echo Verifying dependencies...
+echo ========================================================
+call npm install
+if %errorLevel% neq 0 (
+    echo ERROR: npm install failed. Aborting build.
+    pause
+    exit /b 1
+)
+
+echo ========================================================
 echo Building Wave Link Hotkey Manager Portable App...
 echo ========================================================
 call npm run build:portable

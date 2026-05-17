@@ -168,16 +168,58 @@
             font-weight: bold;
             z-index: 1000;
         }
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 13px;
+            font-weight: 600;
+            padding: 4px 10px;
+            border-radius: 12px;
+            background: rgba(0,0,0,0.08);
+        }
+        .status-badge.connected { color: #107c10; }
+        .status-badge.disconnected { color: var(--danger); }
+        .status-dot {
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+        .status-badge.connected .status-dot { background: #107c10; }
+        .status-badge.disconnected .status-dot { background: var(--danger); }
+
+        .admin-banner {
+            display: none;
+            background: #fff4ce;
+            border: 1px solid #f0c040;
+            border-radius: 6px;
+            padding: 10px 14px;
+            font-size: 13px;
+            color: #5d4300;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 4px;
+        }
+        @media (prefers-color-scheme: dark) {
+            .admin-banner { background: #3b2e00; border-color: #a07800; color: #ffd966; }
+            .status-badge { background: rgba(255,255,255,0.08); }
+        }
     </style>
 </head>
 
 <body>
+    <div id="admin-banner" class="admin-banner">
+        ⚠️ <strong>Not running as Administrator.</strong> Hotkeys may not work in elevated apps (e.g. Task Manager).
+        <button id="btn-relaunch-admin" style="margin-left:auto; padding: 4px 12px; font-size: 12px;">Relaunch as Admin</button>
+    </div>
+
     <h1>Wave Link Hotkey Manager</h1>
 
     <div class="container">
         <div class="card">
             <div class="card-header">
                 <h2>Global Settings</h2>
+                <span id="wl-status" class="status-badge disconnected"><span class="status-dot"></span> Disconnected</span>
             </div>
             <div class="trigger-body" style="padding-top: 10px;">
                 <div class="form-group" style="flex-direction: row; align-items: center; gap: 8px;">
@@ -187,6 +229,17 @@
                 <div class="form-group" style="flex-direction: row; align-items: center; gap: 8px; margin-left: 16px;">
                     <input type="checkbox" id="osd-enabled" checked>
                     <label for="osd-enabled" style="font-size: 14px; opacity: 1;">Enable OSD</label>
+                </div>
+                <div class="form-group" style="flex-direction: row; align-items: center; gap: 8px; margin-left: 16px;">
+                    <input type="checkbox" id="auto-elevate">
+                    <label for="auto-elevate" style="font-size: 14px; opacity: 1;">Auto-Elevate to Admin on Start</label>
+                </div>
+                <div class="form-group" style="flex-direction: row; align-items: center; gap: 8px; margin-left: 16px;">
+                    <input type="checkbox" id="start-with-windows">
+                    <label for="start-with-windows" style="font-size: 14px; opacity: 1;">Start with Windows</label>
+                </div>
+                <div class="form-group" style="margin-left: auto;">
+                    <button id="btn-reconnect" style="padding: 6px 14px; font-size: 13px;">⟳ Reconnect to Wave Link</button>
                 </div>
                 <div class="form-group" style="margin-left: 16px;">
                     <label>OSD Position</label>
@@ -227,6 +280,25 @@
             shell.openExternal('https://FairTech.app');
         });
 
+        document.getElementById('btn-reconnect').addEventListener('click', () => {
+            ipcRenderer.send('manual-reconnect');
+        });
+
+        document.getElementById('btn-relaunch-admin').addEventListener('click', () => {
+            ipcRenderer.send('relaunch-as-admin');
+        });
+
+        ipcRenderer.on('connection-status', (e, { connected }) => {
+            const badge = document.getElementById('wl-status');
+            badge.className = 'status-badge ' + (connected ? 'connected' : 'disconnected');
+            badge.innerHTML = `<span class="status-dot"></span> ${connected ? 'Wave Link Connected' : 'Wave Link Disconnected'}`;
+        });
+
+        ipcRenderer.on('admin-status', (e, { isAdmin }) => {
+            const banner = document.getElementById('admin-banner');
+            banner.style.display = isAdmin ? 'none' : 'flex';
+        });
+
         let channels = [];
         let outputDevices = [];
         let config = { hotkeys: {} };
@@ -253,6 +325,12 @@
             const osdEnabledCheck = document.getElementById('osd-enabled');
             osdEnabledCheck.checked = config.osdEnabled !== false;
 
+            const autoElevateCheck = document.getElementById('auto-elevate');
+            autoElevateCheck.checked = config.autoElevate === true;
+
+            const startWithWindowsCheck = document.getElementById('start-with-windows');
+            startWithWindowsCheck.checked = config.startWithWindows === true;
+
             renderHotkeyList();
         });
 
@@ -268,6 +346,16 @@
 
         document.getElementById('osd-enabled').addEventListener('change', (e) => {
             config.osdEnabled = e.target.checked;
+            saveConfig();
+        });
+
+        document.getElementById('auto-elevate').addEventListener('change', (e) => {
+            config.autoElevate = e.target.checked;
+            saveConfig();
+        });
+
+        document.getElementById('start-with-windows').addEventListener('change', (e) => {
+            config.startWithWindows = e.target.checked;
             saveConfig();
         });
 
