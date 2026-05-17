@@ -65,8 +65,12 @@ function saveConfig() {
 function applyLoginItemSettings() {
   // app.setLoginItemSettings writes to HKCU\Software\Microsoft\Windows\CurrentVersion\Run
   // which is what Task Manager's Startup tab reads.
+  // PORTABLE_EXECUTABLE_FILE is set by electron-builder when running a portable exe,
+  // preventing the startup entry from pointing to the extracted temp folder.
+  const exePath = process.env.PORTABLE_EXECUTABLE_FILE || process.execPath;
   app.setLoginItemSettings({
     openAtLogin: config.startWithWindows === true,
+    path: exePath,
     name: 'Wave Link Hotkey Manager'
   });
 }
