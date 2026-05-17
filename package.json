@@ -32,10 +32,14 @@
       "icon": "assets/WLHK.ico"
     },
     "nsis": {
+      "artifactName": "WLHK.Setup.exe",
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true
+    },
+    "portable": {
+      "artifactName": "WLHK.exe"
     }
   }
 }
