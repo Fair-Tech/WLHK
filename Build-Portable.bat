@@ -1,33 +1,33 @@
 @echo off
-title Wave Link Hotkey Manager - Build Portable
+setlocal
+REM ─────────────────────────────────────────────────────────────────────────────
+REM  WLHK v2 portable build: Native AOT single exe (requires .NET 10 SDK and
+REM  the MSVC C++ build tools for the native linker step).
+REM ─────────────────────────────────────────────────────────────────────────────
 
-:: Request Administrator privileges
-net session >nul 2>&1
-if %errorLevel% == 0 (
-    goto :build
-) else (
-    echo Requesting Administrator privileges...
-    powershell -Command "Start-Process '%~dpnx0' -Verb RunAs"
-    exit /b
+REM Put vswhere on PATH (the AOT toolchain uses it to locate link.exe)
+set "PATH=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer;%PATH%"
+
+REM Enter a VS developer environment if available so link.exe resolves
+set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+if exist "%VSWHERE%" (
+    for /f "usebackq tokens=*" %%i in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSDIR=%%i"
 )
+if defined VSDIR call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat" >nul
 
-:build
-cd /d "%~dp0"
-echo ========================================================
-echo Verifying dependencies...
-echo ========================================================
-call npm install
-if %errorLevel% neq 0 (
-    echo ERROR: npm install failed. Aborting build.
+cd /d "%~dp0src"
+dotnet publish -c Release -r win-x64 -o "..\dist"
+if errorlevel 1 (
+    echo.
+    echo Build FAILED.
     pause
     exit /b 1
 )
 
-echo ========================================================
-echo Building Wave Link Hotkey Manager Portable App...
-echo ========================================================
-call npm run build:portable
-
+del "..\dist\WLHK.pdb" 2>nul
 echo.
-echo Build Complete! Check the 'dist' folder.
+echo ─────────────────────────────────────────────
+echo  Done: %~dp0dist\WLHK.exe
+echo  (true single exe - no runtime, no extraction)
+echo ─────────────────────────────────────────────
 pause
