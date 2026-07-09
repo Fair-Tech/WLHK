@@ -25,6 +25,7 @@ public sealed class ConfigForm : Form
     private Panel _adminBanner = null!;
     private Panel? _recordOverlay;
     private bool _updatingUi;
+    private string _waveSignature = "";
 
     private sealed record ComboItem(string Id, string Name)
     {
@@ -58,6 +59,7 @@ public sealed class ConfigForm : Form
         BackColor = _t.Bg;
         ForeColor = _t.Text;
         Font = new Font("Segoe UI", 9.5f);
+        DoubleBuffered = true;
 
         BuildLayout();
         RefreshAll();
@@ -74,11 +76,47 @@ public sealed class ConfigForm : Form
         };
     }
 
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            // WS_EX_COMPOSITED: the window and all children are painted in one
+            // buffered pass — removes the flicker when the hotkey list rebuilds.
+            var cp = base.CreateParams;
+            cp.ExStyle |= 0x02000000;
+            return cp;
+        }
+    }
+
     private void OnWlChanged()
     {
         if (IsDisposed) return;
-        try { BeginInvoke(RefreshAll); } catch { }
+        try
+        {
+            BeginInvoke(() =>
+            {
+                if (IsDisposed) return;
+                UpdateStatusBadge();
+                // Only rebuild the cards when the channel/device *lists* change.
+                // Volume/mute notifications (incl. echoes of our own hotkey actions)
+                // don't affect the dropdown contents and shouldn't repaint anything.
+                string sig = WaveSignature();
+                if (sig != _waveSignature)
+                {
+                    _waveSignature = sig;
+                    _updatingUi = true;
+                    try { RebuildHotkeyList(); }
+                    finally { _updatingUi = false; }
+                }
+            });
+        }
+        catch { }
     }
+
+    private string WaveSignature() =>
+        string.Join("|", _wl.GetChannels().Select(c => c.Id + "" + c.Name)) + "" +
+        string.Join("|", _wl.GetOutputDevices().Select(d => d.Id + "" + d.Name)) + "" +
+        _wl.IsConnected;
 
     private void RefreshAll()
     {
@@ -88,6 +126,7 @@ public sealed class ConfigForm : Form
         {
             UpdateStatusBadge();
             UpdateGlobalControls();
+            _waveSignature = WaveSignature();
             RebuildHotkeyList();
         }
         finally { _updatingUi = false; }
@@ -347,6 +386,8 @@ public sealed class ConfigForm : Form
 
     private void RebuildHotkeyList()
     {
+        var scrollPos = _scroll.AutoScrollPosition; // returns negative offsets
+        _scroll.SuspendLayout();
         _hotkeyList.SuspendLayout();
         foreach (Control c in _hotkeyList.Controls.Cast<Control>().ToList())
             c.Dispose();
@@ -364,6 +405,8 @@ public sealed class ConfigForm : Form
             spacer.BringToFront();
         }
         _hotkeyList.ResumeLayout();
+        _scroll.ResumeLayout();
+        _scroll.AutoScrollPosition = new Point(-scrollPos.X, -scrollPos.Y);
     }
 
     private Panel BuildHotkeyCard(string combo, HotkeyBinding binding)
