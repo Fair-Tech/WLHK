@@ -63,11 +63,25 @@ public static class Elevation
 public static class Autostart
 {
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
+    private const string ApprovedKey = @"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
     private const string ValueName = "Wave Link Hotkey Manager";
+
+    /// <summary>The Run entry exists (regardless of which exe path it points at).</summary>
+    public static bool IsRegistered()
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(RunKey);
+            return key?.GetValue(ValueName) is string;
+        }
+        catch { return false; }
+    }
 
     /// <summary>
     /// HKCU Run entry (same location v1 used — visible in Task Manager's Startup tab).
-    /// Always points at the real exe path; there is no temp-extraction path to get wrong anymore.
+    /// Called only on an explicit user toggle, never automatically at launch:
+    /// enable registers the currently-running exe wherever it lives, disable removes
+    /// the entry outright. If the exe is moved, disable + re-enable re-registers it.
     /// </summary>
     public static void Apply(bool enabled)
     {
@@ -75,21 +89,20 @@ public static class Autostart
         {
             using var key = Registry.CurrentUser.OpenSubKey(RunKey, writable: true)
                             ?? Registry.CurrentUser.CreateSubKey(RunKey);
-            string exe = Environment.ProcessPath ?? Application.ExecutablePath;
             if (enabled)
             {
+                string exe = Environment.ProcessPath ?? Application.ExecutablePath;
                 key.SetValue(ValueName, $"\"{exe}\"");
             }
             else
             {
-                // Only remove the entry if it points at *this* exe — never clobber
-                // another install's startup entry (e.g. v1 coexisting during migration).
-                if (key.GetValue(ValueName) is string current &&
-                    current.Trim('"').Equals(exe, StringComparison.OrdinalIgnoreCase))
-                {
-                    key.DeleteValue(ValueName, throwOnMissingValue: false);
-                }
+                key.DeleteValue(ValueName, throwOnMissingValue: false);
             }
+
+            // Reset Windows' separate enabled/disabled bookkeeping (Task Manager's
+            // Startup tab) so a re-created entry can't inherit a stale "disabled" state.
+            using var approved = Registry.CurrentUser.OpenSubKey(ApprovedKey, writable: true);
+            approved?.DeleteValue(ValueName, throwOnMissingValue: false);
         }
         catch
         {

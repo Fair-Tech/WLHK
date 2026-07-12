@@ -107,7 +107,8 @@ public sealed class TrayApp : ApplicationContext
         _hook.SetMappedCombos(c.Hotkeys.Keys);
         _hook.SetEnabled(c.HotkeysEnabled);
         _engine.Enabled = c.HotkeysEnabled;
-        Autostart.Apply(c.StartWithWindows);
+        // Note: autostart is deliberately NOT touched here — the Run entry changes
+        // only on an explicit "Start with Windows" toggle in the config window.
         RebuildTrayMenu();
     }
 

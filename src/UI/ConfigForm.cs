@@ -231,7 +231,12 @@ public sealed class ConfigForm : Form
         _cbHotkeys = Check("Enable Hotkeys", 16, y1, (v) => { _store.Current.HotkeysEnabled = v; Apply(); });
         _cbOsd = Check("Enable OSD", 150, y1, (v) => { _store.Current.OsdEnabled = v; Apply(); });
         _cbElevate = Check("Auto-Elevate to Admin on Start", 268, y1, (v) => { _store.Current.AutoElevate = v; Apply(); });
-        _cbStartup = Check("Start with Windows", 495, y1, (v) => { _store.Current.StartWithWindows = v; Apply(); });
+        _cbStartup = Check("Start with Windows", 495, y1, (v) =>
+        {
+            _store.Current.StartWithWindows = v;
+            Autostart.Apply(v); // registry changes only on explicit toggle
+            Apply();
+        });
         card.Controls.AddRange(new Control[] { _cbHotkeys, _cbOsd, _cbElevate, _cbStartup });
 
         // Row 2: OSD position, volume step, OSD duration, reconnect
@@ -310,7 +315,9 @@ public sealed class ConfigForm : Form
         _cbHotkeys.Checked = c.HotkeysEnabled;
         _cbOsd.Checked = c.OsdEnabled;
         _cbElevate.Checked = c.AutoElevate;
-        _cbStartup.Checked = c.StartWithWindows;
+        // Show the actual registry state, not the config flag — they can drift
+        // (entry removed in Task Manager, exe moved, another install toggled it).
+        _cbStartup.Checked = Autostart.IsRegistered();
         int posIdx = Array.FindIndex(OsdPositions, p => p.Value == c.OsdPosition);
         _ddOsdPos.SelectedIndex = posIdx >= 0 ? posIdx : 8;
         _numStep.Value = Math.Clamp(c.VolumeStep, (int)_numStep.Minimum, (int)_numStep.Maximum);
