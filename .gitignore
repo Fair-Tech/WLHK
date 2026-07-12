@@ -1,8 +1,15 @@
-node_modules/
-vendor/*/node_modules/
+# .NET build artifacts
+bin/
+obj/
 dist/
 *.log
-.DS_Store
+
+# User/local
 config.json
+WLHK_data/
 .vscode/
+.vs/
 .dev/
+.claude
+.agent
+.DS_Store

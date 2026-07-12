@@ -1,48 +1,52 @@
-# Wave Link Hotkey Manager
+# Wave Link Hotkey Manager (WLHK) 2.0
 
-Wave Link Hotkey Manager is a lightweight background utility that provides system-wide custom hotkey support for the Elgato Wave Link software. It allows you to configure advanced, object-focused hotkeys for volume control, muting channels, and cycling output devices natively on Windows, all without a Stream Deck.
+Wave Link Hotkey Manager is a lightweight background utility that provides system-wide custom hotkey support for Elgato Wave Link. Configure tap, hold, and double-press actions per key for muting channels, adjusting volume, and switching output devices — natively on Windows, without a Stream Deck.
 
 Built by FairTech.
 
+**v2.0 is a ground-up rewrite in C# / .NET Native AOT.** The Electron runtime is gone:
+
+|  | v1 (Electron) | v2 (Native AOT) |
+|---|---|---|
+| Idle RAM (private) | ~90 MB | **~13 MB** |
+| Processes | 4+ (main, GPU, 2 renderers, key server) | **1** |
+| Portable exe | self-extracts to `%TEMP%` every launch | **true single file, zero extraction** |
+| Distribution | ~80 MB installer | **~18 MB exe, no runtime install** |
+| Keystroke handling | out-of-process helper over stdio | in-process low-level hook |
+
 ## Features
-- **Object-Focused Customization:** Create standard tap, hold, and double-press actions per-key.
-- **System-Wide Detection:** Hooks natively into your OS to capture keystrokes, completely bypassing Elgato's limitations.
-- **Smart OS Suppression:** Blocks the default OS behavior when triggering hotkeys (e.g. mapping your keyboard's native Volume Mute button strictly to Wave Link without actually muting your whole system).
-- **On-Screen Display (OSD):** Beautiful, modern overlay that shows the action taken with fully customizable anchor positioning across 9 screen positions.
-- **Global Settings:** Instantly disable/enable hotkeys or the OSD without closing the app.
-- **Auto-Reconnect:** Automatically reconnects to Wave Link on startup, after sleep/wake cycles, or if the connection drops.
-- **Start with Windows:** Optional Windows startup entry, visible in Task Manager's Startup tab.
-- **Admin Elevation:** Optional auto-elevation on start to ensure hotkeys work in admin-elevated apps like Task Manager.
+- **Per-key trigger customization:** tap, hold (configurable duration), and double-press actions on any key or combo.
+- **System-wide detection:** low-level OS keyboard hook — works regardless of app focus, bypassing Elgato's software limitations.
+- **Smart OS suppression:** mapped keys are swallowed, so binding your keyboard's Volume Mute to a Wave Link channel doesn't also mute Windows.
+- **Actions:** toggle mute, volume up/down (configurable step), set absolute volume, switch output device, cycle output devices.
+- **On-Screen Display:** frameless dark overlay with 9 anchor positions, shown on the monitor your cursor is on; text and volume-bar modes; configurable duration.
+- **Auto-reconnect:** finds Wave Link via its `ws-info.json` port file (with a 1884–1893 scan fallback) and retries forever with backoff — at boot, after sleep/wake, or if Wave Link restarts.
+- **Start with Windows**, **auto-elevate to Admin** (for hotkeys in elevated apps), single-instance, light/dark mode.
+- **Portable data mode:** create a `WLHK_data` folder next to `WLHK.exe` and all settings live there instead of `%APPDATA%\WLHK`.
+- **v1 config migration:** existing v1 hotkey configs are picked up automatically on first run.
 
 ## Requirements
-- Windows 10/11
-- Elgato Wave Link 3.1+
-- Node.js (for local development only)
+- Windows 10/11 (x64)
+- Elgato Wave Link 3.x
 
-## Installation & Usage
+## Building
+- .NET 10 SDK
+- Visual Studio 2022+ with the "Desktop development with C++" workload (the Native AOT linker needs MSVC)
 
-### Running without Building
-1. Clone the repository.
-2. Run `npm install`
-3. Run `npm start` to launch the background daemon.
+Run **`Build-Portable.bat`** — output is a single self-contained `dist\WLHK.exe`.
 
-### Building
-Double-click either build script from File Explorer — they will automatically request Administrator privileges and install dependencies before building.
+For development: `dotnet run` inside `src/` (JIT mode, no MSVC needed).
 
-- **`Build-Installer.bat`** — Generates a standard Windows installer (`.exe` setup wizard)
-- **`Build-Portable.bat`** — Generates a standalone portable `.exe` (no installation required)
+## Usage
+The app lives in your system tray. Double-click the tray icon to open the configuration window; right-click for quick toggles (hotkeys, OSD), reconnect, and quit.
 
-The output will be placed in the `/dist` directory.
+Click **Record New Hotkey**, press the key or combo you want, then enable and configure any of the three triggers (Normal Press / Hold / Double Press) on its card.
 
-> **Note on Antivirus:** The keyboard hook library (`node-global-key-listener`) may trigger a false positive from Windows Defender or other AV software due to its low-level input capture. The binary is open-source and available for inspection. You may need to add an exclusion for the application folder.
+**Running as Administrator** is recommended if you use hotkeys while focused on elevated apps (Task Manager, some games). Enable "Auto-Elevate to Admin on Start" in Global Settings. The `--no-elevate` command-line flag skips auto-elevation for a single launch.
 
-## Configuration
-The app runs seamlessly in the background and is accessible via your System Tray. Double-click the tray icon to open the configuration dashboard, or right-click for quick options to disable/enable hotkeys and the OSD globally, or reconnect to Wave Link.
-
-**Running as Administrator** is recommended if you use hotkeys while focused on admin-elevated applications (e.g. Task Manager, certain games). The app can be configured to auto-elevate on launch from the Global Settings panel.
+> **Note on Antivirus:** the global keyboard hook (`SetWindowsHookEx`) can trigger false positives in some AV products. The source is open for inspection; add an exclusion if needed.
 
 ## Credits, Acknowledgments, & Disclaimers
-Credits to the creator of the [node-wave-link-sdk](https://github.com/DarrellVS/node-wave-link-sdk), ([@darrellvs](https://github.com/darrellvs))
-This tool would have been a lot more effort to make if not for this library!
+The Wave Link WebSocket protocol handling in v1 was based on [node-wave-link-sdk](https://github.com/DarrellVS/node-wave-link-sdk) by [@darrellvs](https://github.com/darrellvs) — v2's native client is a from-scratch implementation of the same protocol, and that library's existence made both versions dramatically easier to build.
 
 This utility is not affiliated with, endorsed by, or sponsored by Elgato or Corsair. Elgato and Wave Link are trademarks of their respective owners. I just don't like how they lock down their ecosystem. (But opening Wave Link software for any mic is a HUGE step in the right direction! Thanks Elgato!)

@@ -1,9 +1,0 @@
-{
-  "name": "@darrellvs/node-wave-link-sdk",
-  "version": "2.0.2",
-  "description": "An unofficial SDK for Elgato's Wave Link (supports Wave Link 3.x)",
-  "main": "./dist/index.js",
-  "files": ["dist"],
-  "author": "Darrell van Swinderen",
-  "license": "ISC"
-}

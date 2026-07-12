@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AssemblyName>WLHK</AssemblyName>
+    <RootNamespace>Wlhk</RootNamespace>
+    <ApplicationIcon>..\assets\WLHK.ico</ApplicationIcon>
+    <Version>2.0.0</Version>
+    <Product>Wave Link Hotkey Manager</Product>
+    <AssemblyTitle>Wave Link Hotkey Manager</AssemblyTitle>
+    <Company>FairTech</Company>
+
+    <!-- Native AOT: true single-file exe, no runtime install, no temp extraction -->
+    <PublishAot>true</PublishAot>
+    <OptimizationPreference>Size</OptimizationPreference>
+    <StripSymbols>true</StripSymbols>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <_SuppressWinFormsTrimError>true</_SuppressWinFormsTrimError>
+
+    <!-- WFO5001: experimental WinForms dark-mode API -->
+    <NoWarn>$(NoWarn);WFO5001</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="..\assets\WLHK.ico" LogicalName="WLHK.ico" />
+  </ItemGroup>
+
+</Project>
