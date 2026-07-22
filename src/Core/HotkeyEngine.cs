@@ -35,18 +35,14 @@ public sealed class HotkeyEngine
     private readonly Dictionary<string, KeyState> _states = new();
 
     private readonly ConfigStore _config;
-    private readonly WaveLinkClient _wl;
-
-    /// <summary>(title, textValue, sliderPercent) — exactly one of textValue/sliderPercent is set.</summary>
-    private readonly Action<string, string?, int?> _showOsd;
+    private readonly HotkeyActionExecutor _executor;
 
     public bool Enabled { get; set; } = true;
 
     public HotkeyEngine(ConfigStore config, WaveLinkClient wl, Action<string, string?, int?> showOsd)
     {
         _config = config;
-        _wl = wl;
-        _showOsd = showOsd;
+        _executor = new HotkeyActionExecutor(() => _config.Snapshot, wl, showOsd);
     }
 
     public void OnKey(string combo, bool isDown)
@@ -152,91 +148,5 @@ public sealed class HotkeyEngine
     private HotkeyBinding? GetBinding(string key) =>
         _config.Snapshot.Hotkeys.TryGetValue(key, out var b) ? b : null;
 
-    // ─── Actions ────────────────────────────────────────────────────────────────
-
-    private void ExecuteAction(HotkeyAction? action)
-    {
-        if (action is null) return;
-        if (!_wl.IsConnected)
-        {
-            _showOsd("Wave Link Disconnected", "Failed", null);
-            return;
-        }
-
-        switch (action.Type)
-        {
-            case "mute_channel": MuteChannel(action); break;
-            case "volume_up_channel": AdjustVolume(action, +ResolveStep(action)); break;
-            case "volume_down_channel": AdjustVolume(action, -ResolveStep(action)); break;
-            case "set_volume": SetVolume(action); break;
-            case "switch_output": SwitchOutput(action); break;
-            case "cycle_output": CycleOutput(action); break;
-        }
-    }
-
-    private int ResolveStep(HotkeyAction action)
-    {
-        int step = action.Step ?? _config.Snapshot.VolumeStep;
-        return Math.Clamp(step, 1, 50);
-    }
-
-    private void MuteChannel(HotkeyAction action)
-    {
-        var channel = _wl.GetChannelById(action.ChannelId);
-        if (channel is not null)
-        {
-            bool newMute = !channel.IsMuted;
-            _wl.SetChannel(channel.Id, isMuted: newMute);
-            _showOsd($"Channel: {channel.Name}", newMute ? "Muted" : "Unmuted", null);
-            return;
-        }
-
-        // v1 fallback: the id may refer to an input device rather than a channel.
-        var device = _wl.GetInputDeviceById(action.ChannelId);
-        if (device is { Inputs.Count: > 0 })
-        {
-            bool newMute = !device.Inputs[0].IsMuted;
-            _wl.SetInputMute(device.Id, device.Inputs[0].Id, newMute);
-            _showOsd($"Input: {device.Name}", newMute ? "Muted" : "Unmuted", null);
-        }
-    }
-
-    private void AdjustVolume(HotkeyAction action, int delta)
-    {
-        var channel = _wl.GetChannelById(action.ChannelId);
-        if (channel is null) return;
-        int newVolume = Math.Clamp((int)Math.Round(channel.Level * 100) + delta, 0, 100);
-        _wl.SetChannel(channel.Id, level: newVolume / 100.0);
-        _showOsd($"Volume: {channel.Name}", null, newVolume);
-    }
-
-    private void SetVolume(HotkeyAction action)
-    {
-        var channel = _wl.GetChannelById(action.ChannelId);
-        if (channel is null) return;
-        int target = Math.Clamp(action.Value ?? 50, 0, 100);
-        _wl.SetChannel(channel.Id, level: target / 100.0);
-        _showOsd($"Volume: {channel.Name}", null, target);
-    }
-
-    private void SwitchOutput(HotkeyAction action)
-    {
-        var target = _wl.GetOutputDeviceById(action.DeviceId);
-        if (target is null) return;
-        _wl.SetMainOutput(target.Id);
-        _showOsd("Output Device:", target.Name, null);
-    }
-
-    private void CycleOutput(HotkeyAction action)
-    {
-        var ids = action.DeviceIds;
-        if (ids is null || ids.Count == 0) return;
-
-        int currentIndex = ids.IndexOf(_wl.MainOutputId);
-        int nextIndex = (currentIndex + 1) % ids.Count;
-        var target = _wl.GetOutputDeviceById(ids[nextIndex]);
-        if (target is null) return;
-        _wl.SetMainOutput(target.Id);
-        _showOsd("Output Device:", target.Name, null);
-    }
+    private void ExecuteAction(HotkeyAction? action) => _executor.Execute(action);
 }

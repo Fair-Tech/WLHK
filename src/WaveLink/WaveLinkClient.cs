@@ -61,7 +61,7 @@ public sealed class InputDevice
 /// forever (v1 gave up after 5 tries). Manual reconnect and power-resume skip
 /// the current wait.
 /// </summary>
-public sealed class WaveLinkClient : IDisposable
+public sealed class WaveLinkClient : IDisposable, IWaveLinkControl
 {
     public bool IsConnected { get; private set; }
 
