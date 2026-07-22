@@ -144,6 +144,67 @@ public sealed class WaveLinkClientConcurrencyTests
     }
 
     [Fact]
+    public async Task SuccessfulSendWithoutEchoAllowsUnrecognizedAuthoritativePatch()
+    {
+        using var client = CreateClient();
+        LoadChannel(client);
+
+        client.SetChannelMix("mic", "vc", level: 0.8);
+        await client.WaitForMutationQueueAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        PatchMixLevel(client, 0.4);
+
+        Assert.Equal(0.4,
+            Assert.Single(Assert.Single(client.GetChannels()).Mixes).Level);
+    }
+
+    [Fact]
+    public async Task DelayedEchoesOfAllDeliveredValuesCannotRegressAuthoritativePatch()
+    {
+        using var client = CreateClient();
+        LoadChannel(client);
+
+        double[] deliveredValues = [0.2, 0.4, 0.8];
+        foreach (double value in deliveredValues)
+            client.SetChannelMix("mic", "vc", level: value);
+        await client.WaitForMutationQueueAsync().WaitAsync(TimeSpan.FromSeconds(5));
+
+        PatchMixLevel(client, 0.6);
+        Assert.Equal(0.6,
+            Assert.Single(Assert.Single(client.GetChannels()).Mixes).Level);
+
+        foreach (double delayedEcho in deliveredValues.Reverse())
+        {
+            PatchMixLevel(client, delayedEcho);
+            Assert.Equal(0.6,
+                Assert.Single(Assert.Single(client.GetChannels()).Mixes).Level);
+        }
+    }
+
+    [Fact]
+    public async Task SetChannelMixDoesNotSendAfterPairDisappears()
+    {
+        var sent = new List<JsonObject>();
+        using var client = new WaveLinkClient((_, payload) =>
+        {
+            lock (sent)
+                sent.Add(payload);
+            return Task.CompletedTask;
+        });
+        LoadChannel(client);
+        client.HandleMessage("""
+            {"method":"channelsChanged","params":{"channels":[
+              {"id":"mic","name":"Microphone","level":0.5,"isMuted":false,"mixes":[]}
+            ]}}
+            """);
+
+        client.SetChannelMix("mic", "vc", level: 0.8);
+        await client.WaitForMutationQueueAsync().WaitAsync(TimeSpan.FromSeconds(5));
+
+        lock (sent)
+            Assert.Empty(sent);
+    }
+
+    [Fact]
     public async Task FailedPairSendReleasesEchoProtection()
     {
         var sendStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);

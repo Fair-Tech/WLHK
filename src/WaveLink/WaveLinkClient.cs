@@ -125,9 +125,11 @@ public sealed class WaveLinkClient : IDisposable, IWaveLinkControl
 
     private sealed class PropertyProtection
     {
-        internal PropertyIntent? Latest;
-        internal List<PropertyIntent> Obsolete { get; } = new();
+        internal List<PropertyIntent> InFlight { get; } = new();
+        internal List<PropertyIntent> DeliveredGuards { get; } = new();
     }
+
+    private const int MaxDeliveredGuardsPerProperty = 16;
 
     private readonly record struct IntentToken(ChannelPropertyKey Key, long Version);
 
@@ -400,8 +402,13 @@ public sealed class WaveLinkClient : IDisposable, IWaveLinkControl
                 }
                 finally
                 {
-                    if (!succeeded && request.Intents.Count > 0)
-                        ResolveFailedIntents(request.Intents);
+                    if (request.Intents.Count > 0)
+                    {
+                        if (succeeded)
+                            ResolveDeliveredIntents(request.Intents);
+                        else
+                            ResolveFailedIntents(request.Intents);
+                    }
                     request.Completion.TrySetResult();
                 }
             }
@@ -703,9 +710,7 @@ public sealed class WaveLinkClient : IDisposable, IWaveLinkControl
             protection = new PropertyProtection();
             _propertyProtections[key] = protection;
         }
-        if (protection.Latest is not null)
-            protection.Obsolete.Add(protection.Latest);
-        protection.Latest = new PropertyIntent(version, value);
+        protection.InFlight.Add(new PropertyIntent(version, value));
         return new IntentToken(key, version);
     }
 
@@ -725,35 +730,67 @@ public sealed class WaveLinkClient : IDisposable, IWaveLinkControl
         if (!_propertyProtections.TryGetValue(key, out var protection))
             return true;
 
-        if (protection.Latest is not null)
-        {
-            if (PropertyValuesEqual(protection.Latest.Value, value))
-            {
-                protection.Latest = null;
-                RemoveProtectionIfResolvedLocked(key, protection);
-                return true;
-            }
-
-            int obsoleteIndex = protection.Obsolete.FindLastIndex(
-                intent => PropertyValuesEqual(intent.Value, value));
-            if (obsoleteIndex >= 0)
-                protection.Obsolete.RemoveAt(obsoleteIndex);
-            return false;
-        }
-
-        int staleIndex = protection.Obsolete.FindLastIndex(
+        object currentValue = GetCurrentPropertyValueLocked(key);
+        int inFlightIndex = protection.InFlight.FindLastIndex(
             intent => PropertyValuesEqual(intent.Value, value));
-        if (staleIndex >= 0)
+        if (inFlightIndex >= 0)
         {
-            protection.Obsolete.RemoveAt(staleIndex);
+            protection.InFlight.RemoveAt(inFlightIndex);
             RemoveProtectionIfResolvedLocked(key, protection);
-            return false;
+            return PropertyValuesEqual(currentValue, value);
         }
 
-        // Once the latest intent was confirmed, an unrecognized value is a
-        // fresh authoritative update rather than an echo of a known old write.
-        _propertyProtections.Remove(key);
-        return true;
+        int deliveredIndex = protection.DeliveredGuards.FindLastIndex(
+            intent => PropertyValuesEqual(intent.Value, value));
+        if (deliveredIndex >= 0)
+        {
+            protection.DeliveredGuards.RemoveAt(deliveredIndex);
+            RemoveProtectionIfResolvedLocked(key, protection);
+            return PropertyValuesEqual(currentValue, value);
+        }
+
+        // Unknown values cannot supersede a mutation that has not completed.
+        // Once all sends are delivered, accept authoritative state immediately
+        // while retaining bounded one-shot guards for their delayed echoes.
+        return protection.InFlight.Count == 0;
+    }
+
+    private object GetCurrentPropertyValueLocked(ChannelPropertyKey key)
+    {
+        var channel = _channels.First(candidate => candidate.Id == key.ChannelId);
+        if (key.MixId is null)
+            return key.Property == ChannelProperty.Level
+                ? channel.Level
+                : channel.IsMuted;
+
+        var mix = channel.Mixes.First(candidate => candidate.Id == key.MixId);
+        return key.Property == ChannelProperty.Level
+            ? mix.Level
+            : mix.IsMuted;
+    }
+
+    private void ResolveDeliveredIntents(IReadOnlyList<IntentToken> intents)
+    {
+        lock (_stateLock)
+        {
+            foreach (var token in intents)
+            {
+                if (!_propertyProtections.TryGetValue(token.Key, out var protection))
+                    continue;
+
+                int intentIndex = protection.InFlight.FindIndex(
+                    intent => intent.Version == token.Version);
+                if (intentIndex < 0) continue;
+
+                var delivered = protection.InFlight[intentIndex];
+                protection.InFlight.RemoveAt(intentIndex);
+                protection.DeliveredGuards.RemoveAll(
+                    guard => PropertyValuesEqual(guard.Value, delivered.Value));
+                protection.DeliveredGuards.Add(delivered);
+                if (protection.DeliveredGuards.Count > MaxDeliveredGuardsPerProperty)
+                    protection.DeliveredGuards.RemoveAt(0);
+            }
+        }
     }
 
     private void ResolveFailedIntents(IReadOnlyList<IntentToken> intents)
@@ -765,20 +802,7 @@ public sealed class WaveLinkClient : IDisposable, IWaveLinkControl
                 if (!_propertyProtections.TryGetValue(token.Key, out var protection))
                     continue;
 
-                if (protection.Latest?.Version == token.Version)
-                {
-                    protection.Latest = null;
-                    if (protection.Obsolete.Count > 0)
-                    {
-                        int priorIndex = protection.Obsolete.Count - 1;
-                        protection.Latest = protection.Obsolete[priorIndex];
-                        protection.Obsolete.RemoveAt(priorIndex);
-                    }
-                }
-                else
-                {
-                    protection.Obsolete.RemoveAll(intent => intent.Version == token.Version);
-                }
+                protection.InFlight.RemoveAll(intent => intent.Version == token.Version);
                 RemoveProtectionIfResolvedLocked(token.Key, protection);
             }
         }
@@ -787,7 +811,7 @@ public sealed class WaveLinkClient : IDisposable, IWaveLinkControl
     private void RemoveProtectionIfResolvedLocked(
         ChannelPropertyKey key, PropertyProtection protection)
     {
-        if (protection.Latest is null && protection.Obsolete.Count == 0)
+        if (protection.InFlight.Count == 0 && protection.DeliveredGuards.Count == 0)
             _propertyProtections.Remove(key);
     }
 
@@ -881,30 +905,30 @@ public sealed class WaveLinkClient : IDisposable, IWaveLinkControl
         lock (_stateLock)
         {
             var intents = new List<IntentToken>();
-            if (_channels.Any(channel =>
+            if (!_channels.Any(channel =>
                 channel.Id == channelId && channel.Mixes.Any(mix => mix.Id == mixId)))
+                return;
+
+            PublishChannelCopyLocked(channels =>
             {
-                PublishChannelCopyLocked(channels =>
+                var mix = channels.First(channel => channel.Id == channelId)
+                    .Mixes.First(candidate => candidate.Id == mixId);
+                if (level is double nextLevel)
                 {
-                    var mix = channels.First(channel => channel.Id == channelId)
-                        .Mixes.First(candidate => candidate.Id == mixId);
-                    if (level is double nextLevel)
-                    {
-                        mix.Level = nextLevel;
-                        intents.Add(RegisterIntentLocked(
-                            new ChannelPropertyKey(channelId, mixId, ChannelProperty.Level),
-                            nextLevel));
-                    }
-                    if (isMuted is bool nextMuted)
-                    {
-                        mix.IsMuted = nextMuted;
-                        intents.Add(RegisterIntentLocked(
-                            new ChannelPropertyKey(channelId, mixId, ChannelProperty.IsMuted),
-                            nextMuted));
-                    }
-                    return true;
-                });
-            }
+                    mix.Level = nextLevel;
+                    intents.Add(RegisterIntentLocked(
+                        new ChannelPropertyKey(channelId, mixId, ChannelProperty.Level),
+                        nextLevel));
+                }
+                if (isMuted is bool nextMuted)
+                {
+                    mix.IsMuted = nextMuted;
+                    intents.Add(RegisterIntentLocked(
+                        new ChannelPropertyKey(channelId, mixId, ChannelProperty.IsMuted),
+                        nextMuted));
+                }
+                return true;
+            });
 
             SendNotifySafe("setChannel", p, intents);
         }
