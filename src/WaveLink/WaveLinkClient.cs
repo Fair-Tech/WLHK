@@ -11,6 +11,22 @@ public sealed class Channel
     public string Name = "";
     public bool IsMuted;
     public double Level = 1.0; // 0..1, protocol-native
+    public List<ChannelMix> Mixes = new();
+}
+
+public sealed class ChannelMix
+{
+    public string Id = "";
+    public bool IsMuted;
+    public double Level = 1.0;
+}
+
+public sealed class Mix
+{
+    public string Id = "";
+    public string Name = "";
+    public bool IsMuted;
+    public double Level = 1.0;
 }
 
 public sealed class OutputDevice
@@ -58,6 +74,7 @@ public sealed class WaveLinkClient : IDisposable
     public event Action? ConnectionFailing;
 
     private volatile List<Channel> _channels = new();
+    private volatile List<Mix> _mixes = new();
     private volatile List<OutputDevice> _outputDevices = new();
     private volatile List<InputDevice> _inputDevices = new();
     private volatile string _mainOutputId = "";
@@ -75,11 +92,14 @@ public sealed class WaveLinkClient : IDisposable
     // ─── Public state accessors (lock-free snapshot reads) ─────────────────────
 
     public IReadOnlyList<Channel> GetChannels() => _channels;
+    public IReadOnlyList<Mix> GetMixes() => _mixes;
     public IReadOnlyList<OutputDevice> GetOutputDevices() => _outputDevices;
     public string MainOutputId => _mainOutputId;
 
     public Channel? GetChannelById(string? id) =>
         id is null ? null : _channels.FirstOrDefault(c => c.Id == id);
+    public Mix? GetMixById(string? id) =>
+        id is null ? null : _mixes.FirstOrDefault(m => m.Id == id);
     public OutputDevice? GetOutputDeviceById(string? id) =>
         id is null ? null : _outputDevices.FirstOrDefault(d => d.Id == id);
     public InputDevice? GetInputDeviceById(string? id) =>
@@ -185,11 +205,13 @@ public sealed class WaveLinkClient : IDisposable
                     throw new InvalidOperationException("Not a Wave Link endpoint");
 
                 var channelsTask = SendRequestAsync("getChannels", null, 5000);
+                var mixesTask = SendRequestAsync("getMixes", null, 5000);
                 var outputsTask = SendRequestAsync("getOutputDevices", null, 5000);
                 var inputsTask = SendRequestAsync("getInputDevices", null, 5000);
-                await Task.WhenAll(channelsTask, outputsTask, inputsTask).ConfigureAwait(false);
+                await Task.WhenAll(channelsTask, mixesTask, outputsTask, inputsTask).ConfigureAwait(false);
 
-                _channels = ParseChannels(channelsTask.Result?["channels"]);
+                _channels = WaveLinkProtocol.ParseChannels(channelsTask.Result?["channels"]);
+                _mixes = WaveLinkProtocol.ParseMixes(mixesTask.Result?["mixes"]);
                 var outputsNode = outputsTask.Result;
                 _outputDevices = ParseOutputDevices(outputsNode?["outputDevices"]);
                 _mainOutputId = outputsNode?["mainOutput"]?["outputDeviceId"]?.GetValue<string>() ?? "";
@@ -354,7 +376,7 @@ public sealed class WaveLinkClient : IDisposable
         switch (method)
         {
             case "channelsChanged":
-                _channels = ParseChannels(p["channels"]);
+                _channels = WaveLinkProtocol.ParseChannels(p["channels"]);
                 StateChanged?.Invoke();
                 break;
 
@@ -363,9 +385,23 @@ public sealed class WaveLinkClient : IDisposable
                 var target = GetChannelById(p["id"]?.GetValue<string>());
                 if (target is not null)
                 {
-                    if (p["name"] is JsonNode n) target.Name = n.GetValue<string>();
-                    if (p["isMuted"] is JsonNode m) target.IsMuted = m.GetValue<bool>();
-                    if (p["level"] is JsonNode l) target.Level = l.GetValue<double>();
+                    WaveLinkProtocol.ApplyChannelPatch(target, p);
+                    StateChanged?.Invoke();
+                }
+                break;
+            }
+
+            case "mixesChanged":
+                _mixes = WaveLinkProtocol.ParseMixes(p["mixes"]);
+                StateChanged?.Invoke();
+                break;
+
+            case "mixChanged":
+            {
+                var target = GetMixById(p["id"]?.GetValue<string>());
+                if (target is not null)
+                {
+                    WaveLinkProtocol.ApplyMixPatch(target, p);
                     StateChanged?.Invoke();
                 }
                 break;
@@ -424,22 +460,6 @@ public sealed class WaveLinkClient : IDisposable
 
     // ─── Parsers (tolerant of extra/missing fields) ─────────────────────────────
 
-    private static List<Channel> ParseChannels(JsonNode? arr)
-    {
-        var list = new List<Channel>();
-        if (arr is JsonArray a)
-            foreach (var n in a)
-                if (n is not null)
-                    list.Add(new Channel
-                    {
-                        Id = n["id"]?.GetValue<string>() ?? "",
-                        Name = n["name"]?.GetValue<string>() ?? "",
-                        IsMuted = n["isMuted"]?.GetValue<bool>() ?? false,
-                        Level = n["level"]?.GetValue<double>() ?? 1.0
-                    });
-        return list;
-    }
-
     private static List<OutputDevice> ParseOutputDevices(JsonNode? arr)
     {
         var list = new List<OutputDevice>();
@@ -496,6 +516,16 @@ public sealed class WaveLinkClient : IDisposable
             if (level is double l2) ch.Level = l2;
             if (isMuted is bool m2) ch.IsMuted = m2;
         }
+    }
+
+    public void SetChannelMix(string channelId, string mixId, double? level = null, bool? isMuted = null)
+    {
+        SendNotifySafe("setChannel",
+            WaveLinkProtocol.BuildSetChannelMixParams(channelId, mixId, level, isMuted));
+        var mix = GetChannelById(channelId)?.Mixes.FirstOrDefault(m => m.Id == mixId);
+        if (mix is null) return;
+        if (level is double l) mix.Level = l;
+        if (isMuted is bool m) mix.IsMuted = m;
     }
 
     public void SetMainOutput(string outputDeviceId)
