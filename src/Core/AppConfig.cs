@@ -91,6 +91,12 @@ public sealed class ConfigStore
         }
     }
 
+    internal ConfigStore(string configPath)
+    {
+        ConfigPath = configPath;
+        IsPortable = true;
+    }
+
     public void Load()
     {
         try

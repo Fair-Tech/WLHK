@@ -395,6 +395,7 @@ public sealed class ConfigForm : Form
 
     private void RebuildHotkeyList()
     {
+        bool initializedChannelTargets = InitializeDefaultChannelTargets();
         bool wasUpdatingUi = _updatingUi;
         _updatingUi = true;
         var scrollPos = _scroll.AutoScrollPosition; // returns negative offsets
@@ -425,6 +426,42 @@ public sealed class ConfigForm : Form
             _scroll.AutoScrollPosition = new Point(-scrollPos.X, -scrollPos.Y);
             _updatingUi = wasUpdatingUi;
         }
+
+        if (initializedChannelTargets)
+        {
+            _store.Save();
+            _onConfigApplied();
+        }
+    }
+
+    private bool InitializeDefaultChannelTargets()
+    {
+        string? firstChannelId = _wl.GetChannels().FirstOrDefault()?.Id;
+        if (firstChannelId is null) return false;
+
+        bool changed = false;
+        foreach (var binding in _store.Current.Hotkeys.Values)
+        {
+            foreach (var action in new[]
+                     {
+                         binding.NormalAction, binding.HoldAction, binding.DoublePressAction
+                     })
+            {
+                changed |= InitializeDefaultChannelTarget(action, firstChannelId);
+            }
+        }
+        return changed;
+    }
+
+    private static bool InitializeDefaultChannelTarget(HotkeyAction? action, string? firstChannelId)
+    {
+        if (action is null || action.ChannelId is not null || firstChannelId is null ||
+            action.Type is not ("mute_channel" or "volume_up_channel" or
+                "volume_down_channel" or "set_volume"))
+            return false;
+
+        action.ChannelId = firstChannelId;
+        return true;
     }
 
     private Panel BuildHotkeyCard(string combo, HotkeyBinding binding)
@@ -505,7 +542,9 @@ public sealed class ConfigForm : Form
         cb.CheckedChanged += (_, _) =>
         {
             if (_updatingUi) return;
-            setAction(cb.Checked ? new HotkeyAction { Type = "mute_channel" } : null);
+            HotkeyAction? newAction = cb.Checked ? new HotkeyAction { Type = "mute_channel" } : null;
+            InitializeDefaultChannelTarget(newAction, _wl.GetChannels().FirstOrDefault()?.Id);
+            setAction(newAction);
             Apply();
             RebuildHotkeyList();
         };
@@ -542,7 +581,12 @@ public sealed class ConfigForm : Form
                 action.ChannelId = null;
                 action.MixId = null;
             }
-            else { action.DeviceId = null; action.DeviceIds = null; }
+            else
+            {
+                action.DeviceId = null;
+                action.DeviceIds = null;
+                InitializeDefaultChannelTarget(action, _wl.GetChannels().FirstOrDefault()?.Id);
+            }
             Apply();
             RebuildHotkeyList();
         };
