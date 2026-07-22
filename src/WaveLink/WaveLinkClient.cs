@@ -127,6 +127,8 @@ public sealed class WaveLinkClient : IDisposable, IWaveLinkControl
     {
         internal List<PropertyIntent> InFlight { get; } = new();
         internal List<PropertyIntent> DeliveredGuards { get; } = new();
+        internal PropertyIntent? LatestDeliveredOrConfirmed;
+        internal long? FallbackDeliveredVersion;
     }
 
     private const int MaxDeliveredGuardsPerProperty = 16;
@@ -710,6 +712,7 @@ public sealed class WaveLinkClient : IDisposable, IWaveLinkControl
             protection = new PropertyProtection();
             _propertyProtections[key] = protection;
         }
+        protection.FallbackDeliveredVersion = null;
         protection.InFlight.Add(new PropertyIntent(version, value));
         return new IntentToken(key, version);
     }
@@ -735,7 +738,9 @@ public sealed class WaveLinkClient : IDisposable, IWaveLinkControl
             intent => PropertyValuesEqual(intent.Value, value));
         if (inFlightIndex >= 0)
         {
+            var confirmed = protection.InFlight[inFlightIndex];
             protection.InFlight.RemoveAt(inFlightIndex);
+            RecordDeliveredOrConfirmedLocked(protection, confirmed, addGuard: false);
             RemoveProtectionIfResolvedLocked(key, protection);
             return PropertyValuesEqual(currentValue, value);
         }
@@ -744,15 +749,28 @@ public sealed class WaveLinkClient : IDisposable, IWaveLinkControl
             intent => PropertyValuesEqual(intent.Value, value));
         if (deliveredIndex >= 0)
         {
+            var delivered = protection.DeliveredGuards[deliveredIndex];
+            bool isFallback =
+                protection.FallbackDeliveredVersion == delivered.Version &&
+                protection.InFlight.All(intent => intent.Version < delivered.Version);
             protection.DeliveredGuards.RemoveAt(deliveredIndex);
+            if (isFallback)
+                protection.FallbackDeliveredVersion = null;
             RemoveProtectionIfResolvedLocked(key, protection);
-            return PropertyValuesEqual(currentValue, value);
+            return isFallback || PropertyValuesEqual(currentValue, value);
         }
 
         // Unknown values cannot supersede a mutation that has not completed.
         // Once all sends are delivered, accept authoritative state immediately
         // while retaining bounded one-shot guards for their delayed echoes.
-        return protection.InFlight.Count == 0;
+        bool canApply = protection.InFlight.Count == 0;
+        if (canApply)
+        {
+            protection.FallbackDeliveredVersion = null;
+            protection.LatestDeliveredOrConfirmed = null;
+            RemoveProtectionIfResolvedLocked(key, protection);
+        }
+        return canApply;
     }
 
     private object GetCurrentPropertyValueLocked(ChannelPropertyKey key)
@@ -784,13 +802,26 @@ public sealed class WaveLinkClient : IDisposable, IWaveLinkControl
 
                 var delivered = protection.InFlight[intentIndex];
                 protection.InFlight.RemoveAt(intentIndex);
-                protection.DeliveredGuards.RemoveAll(
-                    guard => PropertyValuesEqual(guard.Value, delivered.Value));
-                protection.DeliveredGuards.Add(delivered);
-                if (protection.DeliveredGuards.Count > MaxDeliveredGuardsPerProperty)
-                    protection.DeliveredGuards.RemoveAt(0);
+                RecordDeliveredOrConfirmedLocked(protection, delivered, addGuard: true);
             }
         }
+    }
+
+    private static void RecordDeliveredOrConfirmedLocked(
+        PropertyProtection protection, PropertyIntent intent, bool addGuard)
+    {
+        if (protection.LatestDeliveredOrConfirmed is null ||
+            protection.LatestDeliveredOrConfirmed.Version < intent.Version)
+        {
+            protection.LatestDeliveredOrConfirmed = intent;
+        }
+        if (!addGuard) return;
+
+        protection.DeliveredGuards.RemoveAll(
+            guard => PropertyValuesEqual(guard.Value, intent.Value));
+        protection.DeliveredGuards.Add(intent);
+        if (protection.DeliveredGuards.Count > MaxDeliveredGuardsPerProperty)
+            protection.DeliveredGuards.RemoveAt(0);
     }
 
     private void ResolveFailedIntents(IReadOnlyList<IntentToken> intents)
@@ -802,7 +833,21 @@ public sealed class WaveLinkClient : IDisposable, IWaveLinkControl
                 if (!_propertyProtections.TryGetValue(token.Key, out var protection))
                     continue;
 
-                protection.InFlight.RemoveAll(intent => intent.Version == token.Version);
+                int failedIndex = protection.InFlight.FindIndex(
+                    intent => intent.Version == token.Version);
+                if (failedIndex < 0) continue;
+
+                bool wasNewest = token.Version ==
+                    protection.InFlight.Max(intent => intent.Version);
+                protection.InFlight.RemoveAt(failedIndex);
+                if (wasNewest)
+                {
+                    var fallback = protection.LatestDeliveredOrConfirmed;
+                    protection.FallbackDeliveredVersion = fallback?.Version;
+                    if (fallback is not null)
+                        RecordDeliveredOrConfirmedLocked(
+                            protection, fallback, addGuard: true);
+                }
                 RemoveProtectionIfResolvedLocked(token.Key, protection);
             }
         }
@@ -811,7 +856,9 @@ public sealed class WaveLinkClient : IDisposable, IWaveLinkControl
     private void RemoveProtectionIfResolvedLocked(
         ChannelPropertyKey key, PropertyProtection protection)
     {
-        if (protection.InFlight.Count == 0 && protection.DeliveredGuards.Count == 0)
+        if (protection.InFlight.Count == 0 &&
+            protection.DeliveredGuards.Count == 0 &&
+            protection.LatestDeliveredOrConfirmed is null)
             _propertyProtections.Remove(key);
     }
 

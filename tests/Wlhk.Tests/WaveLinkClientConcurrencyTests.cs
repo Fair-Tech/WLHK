@@ -231,6 +231,114 @@ public sealed class WaveLinkClientConcurrencyTests
     }
 
     [Fact]
+    public async Task FailedLatestSendAllowsPriorDeliveredValueToRestoreState()
+    {
+        var failedSendStarted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFailedSend = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        int sendCount = 0;
+        using var client = new WaveLinkClient(async (_, _) =>
+        {
+            if (Interlocked.Increment(ref sendCount) != 2) return;
+            failedSendStarted.TrySetResult();
+            await releaseFailedSend.Task;
+            throw new InvalidOperationException("send failed");
+        });
+        LoadChannel(client);
+
+        client.SetChannelMix("mic", "vc", level: 0.4);
+        await client.WaitForMutationQueueAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        client.SetChannelMix("mic", "vc", level: 0.8);
+        await failedSendStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        releaseFailedSend.TrySetResult();
+        await client.WaitForMutationQueueAsync().WaitAsync(TimeSpan.FromSeconds(5));
+
+        PatchMixLevel(client, 0.4);
+
+        Assert.Equal(0.4,
+            Assert.Single(Assert.Single(client.GetChannels()).Mixes).Level);
+    }
+
+    [Fact]
+    public async Task FailedLatestSendRestoresNewestDeliveredValueAfterOlderDelayedEcho()
+    {
+        var failedSendStarted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFailedSend = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        int sendCount = 0;
+        using var client = new WaveLinkClient(async (_, _) =>
+        {
+            if (Interlocked.Increment(ref sendCount) != 3) return;
+            failedSendStarted.TrySetResult();
+            await releaseFailedSend.Task;
+            throw new InvalidOperationException("send failed");
+        });
+        LoadChannel(client);
+
+        client.SetChannelMix("mic", "vc", level: 0.2);
+        client.SetChannelMix("mic", "vc", level: 0.4);
+        await client.WaitForMutationQueueAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        client.SetChannelMix("mic", "vc", level: 0.8);
+        await failedSendStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        releaseFailedSend.TrySetResult();
+        await client.WaitForMutationQueueAsync().WaitAsync(TimeSpan.FromSeconds(5));
+
+        PatchMixLevel(client, 0.2);
+        Assert.Equal(0.8,
+            Assert.Single(Assert.Single(client.GetChannels()).Mixes).Level);
+
+        PatchMixLevel(client, 0.4);
+        Assert.Equal(0.4,
+            Assert.Single(Assert.Single(client.GetChannels()).Mixes).Level);
+    }
+
+    [Fact]
+    public async Task FailedLatestSendFallsBackToValueConfirmedBeforeItsResponse()
+    {
+        var confirmedSendStarted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseConfirmedSend = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        int sendCount = 0;
+        using var client = new WaveLinkClient(async (_, _) =>
+        {
+            int currentSend = Interlocked.Increment(ref sendCount);
+            if (currentSend == 2)
+            {
+                confirmedSendStarted.TrySetResult();
+                await releaseConfirmedSend.Task;
+            }
+            else if (currentSend == 3)
+            {
+                throw new InvalidOperationException("send failed");
+            }
+        });
+        LoadChannel(client);
+
+        client.SetChannelMix("mic", "vc", level: 0.2);
+        await client.WaitForMutationQueueAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        client.SetChannelMix("mic", "vc", level: 0.4);
+        await confirmedSendStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        client.SetChannelMix("mic", "vc", level: 0.8);
+        PatchMixLevel(client, 0.4);
+        Assert.Equal(0.8,
+            Assert.Single(Assert.Single(client.GetChannels()).Mixes).Level);
+
+        releaseConfirmedSend.TrySetResult();
+        await client.WaitForMutationQueueAsync().WaitAsync(TimeSpan.FromSeconds(5));
+
+        PatchMixLevel(client, 0.2);
+        Assert.Equal(0.8,
+            Assert.Single(Assert.Single(client.GetChannels()).Mixes).Level);
+
+        PatchMixLevel(client, 0.4);
+        Assert.Equal(0.4,
+            Assert.Single(Assert.Single(client.GetChannels()).Mixes).Level);
+    }
+
+    [Fact]
     public void DisconnectReleasesEchoProtection()
     {
         using var client = CreateClient();
