@@ -27,6 +27,7 @@ public sealed class HotkeyBinding
     public HotkeyAction? HoldAction { get; set; }
     public HotkeyAction? DoublePressAction { get; set; }
 
+    [JsonIgnore]
     public bool IsEmpty => NormalAction is null && HoldAction is null && DoublePressAction is null;
 }
 

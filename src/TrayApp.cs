@@ -21,6 +21,9 @@ public sealed class TrayApp : ApplicationContext
     private readonly Icon _appIcon;
     private ConfigForm? _configForm;
     private readonly EventWaitHandle _showConfigSignal;
+    private readonly TaskbarWatcher _taskbarWatcher;
+    private readonly System.Windows.Forms.Timer _trayRetryTimer;
+    private int _trayRetries;
 
     public TrayApp(ConfigStore store, EventWaitHandle showConfigSignal)
     {
@@ -45,6 +48,29 @@ public sealed class TrayApp : ApplicationContext
         };
         _tray.MouseDoubleClick += (_, e) => { if (e.Button == MouseButtons.Left) ShowConfig(); };
         RebuildTrayMenu();
+        Log.Write("Tray icon created.");
+
+        // At logon the notification area may not exist yet, and an icon added
+        // before it does is dropped silently. Re-add on the shell's TaskbarCreated
+        // broadcast, and re-assert a few times over the first half minute.
+        _taskbarWatcher = new TaskbarWatcher();
+        _taskbarWatcher.TaskbarCreated += () => OnUi(() =>
+        {
+            Log.Write("TaskbarCreated received; re-adding tray icon.");
+            ReassertTrayIcon();
+        });
+
+        _trayRetryTimer = new System.Windows.Forms.Timer { Interval = 5000 };
+        _trayRetryTimer.Tick += (_, _) =>
+        {
+            if (++_trayRetries > 6)
+            {
+                _trayRetryTimer.Stop();
+                return;
+            }
+            ReassertTrayIcon();
+        };
+        _trayRetryTimer.Start();
 
         _wl.Ready += () => OnUi(RebuildTrayMenu);
         _wl.Disconnected += () => OnUi(RebuildTrayMenu);
@@ -78,6 +104,21 @@ public sealed class TrayApp : ApplicationContext
     }
 
     private volatile bool _disposed;
+
+    /// <summary>Force the shell to re-add our icon (no API exists to query whether it is present).</summary>
+    private void ReassertTrayIcon()
+    {
+        if (_disposed) return;
+        try
+        {
+            _tray.Visible = false;
+            _tray.Visible = true;
+        }
+        catch (Exception ex)
+        {
+            Log.Error("ReassertTrayIcon", ex);
+        }
+    }
 
     private void OnUi(Action action)
     {
@@ -183,7 +224,11 @@ public sealed class TrayApp : ApplicationContext
         if (_disposed) return;
         _disposed = true;
 
+        Log.Write("Quit requested.");
         SystemEvents.PowerModeChanged -= OnPowerModeChanged;
+        _trayRetryTimer.Stop();
+        _trayRetryTimer.Dispose();
+        _taskbarWatcher.Dispose();
         _tray.Visible = false;
         _tray.Dispose();
         _hook.Dispose();

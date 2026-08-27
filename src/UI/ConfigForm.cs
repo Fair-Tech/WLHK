@@ -230,12 +230,21 @@ public sealed class ConfigForm : Form
         int y1 = 48;
         _cbHotkeys = Check("Enable Hotkeys", 16, y1, (v) => { _store.Current.HotkeysEnabled = v; Apply(); });
         _cbOsd = Check("Enable OSD", 150, y1, (v) => { _store.Current.OsdEnabled = v; Apply(); });
-        _cbElevate = Check("Auto-Elevate to Admin on Start", 268, y1, (v) => { _store.Current.AutoElevate = v; Apply(); });
+        _cbElevate = Check("Auto-Elevate to Admin on Start", 268, y1, (v) =>
+        {
+            _store.Current.AutoElevate = v;
+            // Startup mechanism depends on whether elevation is wanted, so
+            // re-register when this changes while startup is enabled.
+            if (Autostart.IsRegistered())
+                Autostart.Apply(true, v);
+            Apply();
+        });
         _cbStartup = Check("Start with Windows", 495, y1, (v) =>
         {
             _store.Current.StartWithWindows = v;
-            Autostart.Apply(v); // registry changes only on explicit toggle
+            Autostart.Apply(v, _store.Current.AutoElevate); // only on explicit toggle
             Apply();
+            _cbStartup.Checked = Autostart.IsRegistered();
         });
         card.Controls.AddRange(new Control[] { _cbHotkeys, _cbOsd, _cbElevate, _cbStartup });
 
