@@ -123,6 +123,33 @@ public sealed class WaveLinkClient : IDisposable, IWaveLinkControl
 
     private sealed record PropertyIntent(long Version, object Value);
 
+    /// <summary>
+    /// Per-property guard against stale echoes.
+    ///
+    /// Every local setter writes an optimistic value and registers an "intent"
+    /// for that property. Wave Link then echoes state back asynchronously, and
+    /// those echoes can describe a value we have already superseded — applying
+    /// one would visibly bounce a volume back down mid-ramp. Each incoming patch
+    /// value is therefore matched against this record:
+    ///
+    ///   InFlight                  intents sent but not yet acknowledged. While
+    ///                             any exist, values we do not recognise cannot
+    ///                             overwrite local state. Matching an in-flight
+    ///                             intent confirms that send.
+    ///   DeliveredGuards           bounded one-shot guards for intents already
+    ///                             delivered, so their (possibly duplicated)
+    ///                             echoes are absorbed once each rather than
+    ///                             reapplied indefinitely.
+    ///   LatestDeliveredOrConfirmed the newest value Wave Link is known to have
+    ///                             accepted; used to restore state when a newer
+    ///                             send fails.
+    ///   FallbackDeliveredVersion  marks that restored value as authoritative, so
+    ///                             its echo is applied instead of suppressed.
+    ///
+    /// Once nothing is in flight the next unrecognised value is accepted as
+    /// authoritative and the record is discarded. Behaviour is pinned by
+    /// WaveLinkClientConcurrencyTests; change the tests and this comment together.
+    /// </summary>
     private sealed class PropertyProtection
     {
         internal List<PropertyIntent> InFlight { get; } = new();
@@ -141,9 +168,20 @@ public sealed class WaveLinkClient : IDisposable, IWaveLinkControl
         internal JsonObject? Params;
         internal IReadOnlyList<IntentToken> Intents = [];
         internal long ConnectionGeneration;
+        internal long QueuedAtTicks = Environment.TickCount64;
         internal TaskCompletionSource Completion { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
+
+    /// <summary>
+    /// Queued setters older than this are dropped instead of sent. Sends are
+    /// serialised to preserve order, so a stalled Wave Link (responding slowly
+    /// but not disconnecting) would otherwise let a held-down volume key build a
+    /// backlog of values that are already obsolete by the time they are sent.
+    /// Dropping resolves their intents as failed, which restores local state to
+    /// the last value Wave Link actually acknowledged.
+    /// </summary>
+    private const int MaxQueuedMutationAgeMs = 2000;
 
     // ─── Public state accessors (lock-free snapshot reads) ─────────────────────
 
@@ -392,7 +430,8 @@ public sealed class WaveLinkClient : IDisposable, IWaveLinkControl
                 try
                 {
                     if (request.Method is not null &&
-                        request.ConnectionGeneration == Volatile.Read(ref _connectionGeneration))
+                        request.ConnectionGeneration == Volatile.Read(ref _connectionGeneration) &&
+                        Environment.TickCount64 - request.QueuedAtTicks <= MaxQueuedMutationAgeMs)
                     {
                         await _mutationSender(request.Method, request.Params!).ConfigureAwait(false);
                         succeeded = true;
@@ -733,7 +772,14 @@ public sealed class WaveLinkClient : IDisposable, IWaveLinkControl
         if (!_propertyProtections.TryGetValue(key, out var protection))
             return true;
 
-        object currentValue = GetCurrentPropertyValueLocked(key);
+        object? currentValue = GetCurrentPropertyValueLocked(key);
+        if (currentValue is null)
+        {
+            // The channel or mix this protection guards no longer exists, so there
+            // is nothing left to protect and no value to compare against.
+            _propertyProtections.Remove(key);
+            return true;
+        }
         int inFlightIndex = protection.InFlight.FindLastIndex(
             intent => PropertyValuesEqual(intent.Value, value));
         if (inFlightIndex >= 0)
@@ -773,15 +819,20 @@ public sealed class WaveLinkClient : IDisposable, IWaveLinkControl
         return canApply;
     }
 
-    private object GetCurrentPropertyValueLocked(ChannelPropertyKey key)
+    /// <summary>Current local value for a guarded property, or null if it no longer exists.</summary>
+    private object? GetCurrentPropertyValueLocked(ChannelPropertyKey key)
     {
-        var channel = _channels.First(candidate => candidate.Id == key.ChannelId);
+        var channel = _channels.FirstOrDefault(candidate => candidate.Id == key.ChannelId);
+        if (channel is null) return null;
+
         if (key.MixId is null)
             return key.Property == ChannelProperty.Level
                 ? channel.Level
                 : channel.IsMuted;
 
-        var mix = channel.Mixes.First(candidate => candidate.Id == key.MixId);
+        var mix = channel.Mixes.FirstOrDefault(candidate => candidate.Id == key.MixId);
+        if (mix is null) return null;
+
         return key.Property == ChannelProperty.Level
             ? mix.Level
             : mix.IsMuted;

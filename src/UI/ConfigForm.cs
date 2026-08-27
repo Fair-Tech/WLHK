@@ -105,7 +105,11 @@ public sealed class ConfigForm : Form
                 {
                     _waveSignature = sig;
                     _updatingUi = true;
-                    try { RebuildHotkeyList(); }
+                    try
+                    {
+                        EnsureChannelTargetsInitialized();
+                        RebuildHotkeyList();
+                    }
                     finally { _updatingUi = false; }
                 }
             });
@@ -129,6 +133,7 @@ public sealed class ConfigForm : Form
             UpdateStatusBadge();
             UpdateGlobalControls();
             _waveSignature = WaveSignature();
+            EnsureChannelTargetsInitialized();
             RebuildHotkeyList();
         }
         finally { _updatingUi = false; }
@@ -271,6 +276,16 @@ public sealed class ConfigForm : Form
         _numOsdMs = Numeric(296, ctlY, 250, 15000, v => { _store.Current.OsdDurationMs = v; Apply(); }, increment: 250);
         card.Controls.Add(_numOsdMs);
 
+        _cbSides = Check("Distinguish L/R Modifiers", 406, ctlY + 2, v =>
+        {
+            _store.Current.DistinguishModifierSides = v;
+            Apply();
+        });
+        _tips.SetToolTip(_cbSides,
+            "Record new hotkeys with side-specific modifiers, e.g. LSHIFT+H and RSHIFT+H as separate hotkeys. "
+            + "Hotkeys already recorded without a side keep matching either modifier.");
+        card.Controls.Add(_cbSides);
+
         var reconnect = PrimaryButton("⟳  Reconnect to Wave Link", 30);
         reconnect.Width = 190;
         reconnect.Anchor = AnchorStyles.Top | AnchorStyles.Right;
@@ -282,7 +297,8 @@ public sealed class ConfigForm : Form
         return card;
     }
 
-    private CheckBox _cbHotkeys = null!, _cbOsd = null!, _cbElevate = null!, _cbStartup = null!;
+    private CheckBox _cbHotkeys = null!, _cbOsd = null!, _cbElevate = null!, _cbStartup = null!, _cbSides = null!;
+    private readonly ToolTip _tips = new();
     private ComboBox _ddOsdPos = null!;
     private NumericUpDown _numStep = null!, _numOsdMs = null!;
 
@@ -329,6 +345,7 @@ public sealed class ConfigForm : Form
         // Show the actual registry state, not the config flag — they can drift
         // (entry removed in Task Manager, exe moved, another install toggled it).
         _cbStartup.Checked = Autostart.IsRegistered();
+        _cbSides.Checked = c.DistinguishModifierSides;
         int posIdx = Array.FindIndex(OsdPositions, p => p.Value == c.OsdPosition);
         _ddOsdPos.SelectedIndex = posIdx >= 0 ? posIdx : 8;
         _numStep.Value = Math.Clamp(c.VolumeStep, (int)_numStep.Minimum, (int)_numStep.Maximum);
@@ -373,7 +390,7 @@ public sealed class ConfigForm : Form
         _recordOverlay.Click += cancel;
         lbl.Click += cancel;
 
-        _hook.BeginRecording(combo =>
+        _hook.BeginRecording(_store.Current.DistinguishModifierSides, combo =>
         {
             try
             {
@@ -402,9 +419,21 @@ public sealed class ConfigForm : Form
 
     // ─── Hotkey cards ──────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Give channel actions that have no target yet the first available channel,
+    /// so a freshly enabled trigger acts on something instead of silently doing
+    /// nothing. Kept out of the render path: it writes config, so it runs only
+    /// when the window opens or the channel list actually changes.
+    /// </summary>
+    private void EnsureChannelTargetsInitialized()
+    {
+        if (!InitializeDefaultChannelTargets()) return;
+        _store.Save();
+        _onConfigApplied();
+    }
+
     private void RebuildHotkeyList()
     {
-        bool initializedChannelTargets = InitializeDefaultChannelTargets();
         bool wasUpdatingUi = _updatingUi;
         _updatingUi = true;
         var scrollPos = _scroll.AutoScrollPosition; // returns negative offsets
@@ -434,12 +463,6 @@ public sealed class ConfigForm : Form
             _scroll.ResumeLayout();
             _scroll.AutoScrollPosition = new Point(-scrollPos.X, -scrollPos.Y);
             _updatingUi = wasUpdatingUi;
-        }
-
-        if (initializedChannelTargets)
-        {
-            _store.Save();
-            _onConfigApplied();
         }
     }
 
@@ -475,7 +498,7 @@ public sealed class ConfigForm : Form
 
     private Panel BuildHotkeyCard(string combo, HotkeyBinding binding)
     {
-        const int rowH = 104;
+        const int rowH = 92;
         var card = Card(52 + rowH * 3 + 12);
 
         var header = new Label
@@ -533,7 +556,7 @@ public sealed class ConfigForm : Form
         var row = new Panel
         {
             Location = loc,
-            Size = new Size(width, 98),
+            Size = new Size(width, 86),
             BackColor = _t.Bg,
             Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
         };
@@ -545,7 +568,7 @@ public sealed class ConfigForm : Form
             Text = label,
             Checked = enabled,
             Font = new Font("Segoe UI Semibold", 9.5f),
-            Location = new Point(12, 27),
+            Location = new Point(12, 22),
             Width = 125
         };
         cb.CheckedChanged += (_, _) =>
@@ -575,8 +598,8 @@ public sealed class ConfigForm : Form
         int x = 145;
 
         // Action type
-        row.Controls.Add(SmallLabel("Action", x, 6));
-        var ddType = new ComboBox { Location = new Point(x, 24), Width = 165, DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat };
+        row.Controls.Add(SmallLabel("Action", x, 4));
+        var ddType = new ComboBox { Location = new Point(x, 20), Width = 165, DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat };
         foreach (var (_, lbl2) in ActionTypes) ddType.Items.Add(lbl2);
         ddType.SelectedIndex = Math.Max(0, Array.FindIndex(ActionTypes, a => a.Type == action!.Type));
         ddType.SelectedIndexChanged += (_, _) =>
@@ -606,8 +629,8 @@ public sealed class ConfigForm : Form
 
         if (action!.Type is "mute_channel" or "volume_up_channel" or "volume_down_channel" or "set_volume")
         {
-            row.Controls.Add(SmallLabel("Target Channel", x, 50));
-            var dd = TargetDropdown(channels, action.ChannelId, new Point(x, 68), id =>
+            row.Controls.Add(SmallLabel("Target Channel", x, 46));
+            var dd = TargetDropdown(channels, action.ChannelId, new Point(x, 62), id =>
             {
                 if (id is null) return;
                 action.ChannelId = id;
@@ -622,30 +645,35 @@ public sealed class ConfigForm : Form
 
             var mixes = MixTargetChoices.Build(_wl.GetChannelById(action.ChannelId), _wl.GetMixes(), action.MixId)
                 .Select(m => new ComboItem(m.Id, m.Name)).ToList();
-            row.Controls.Add(SmallLabel("Target Mix", x, 50));
-            var ddMix = TargetDropdown(mixes, action.MixId, new Point(x, 68), id => { action.MixId = id; Apply(); });
-            row.Controls.Add(ddMix);
-            x += 195;
+            // Only "All Mixes" available: this channel belongs to no mix, so the
+            // dropdown would be a no-op choice.
+            if (mixes.Count > 1)
+            {
+                row.Controls.Add(SmallLabel("Target Mix", x, 46));
+                var ddMix = TargetDropdown(mixes, action.MixId, new Point(x, 62), id => { action.MixId = id; Apply(); });
+                row.Controls.Add(ddMix);
+                x += 195;
+            }
 
             if (action.Type is "volume_up_channel" or "volume_down_channel")
             {
-                row.Controls.Add(SmallLabel("Step (%)", x, 50));
-                var num = Numeric(x, 68, 1, 50, v => { action.Step = v; Apply(); }, width: 70);
+                row.Controls.Add(SmallLabel("Step (%)", x, 46));
+                var num = Numeric(x, 62, 1, 50, v => { action.Step = v; Apply(); }, width: 70);
                 num.Value = Math.Clamp(action.Step ?? _store.Current.VolumeStep, 1, 50);
                 row.Controls.Add(num);
             }
             else if (action.Type == "set_volume")
             {
-                row.Controls.Add(SmallLabel("Level (%)", x, 50));
-                var num = Numeric(x, 68, 0, 100, v => { action.Value = v; Apply(); }, width: 70);
+                row.Controls.Add(SmallLabel("Level (%)", x, 46));
+                var num = Numeric(x, 62, 0, 100, v => { action.Value = v; Apply(); }, width: 70);
                 num.Value = Math.Clamp(action.Value ?? 50, 0, 100);
                 row.Controls.Add(num);
             }
         }
         else if (action.Type == "switch_output")
         {
-            row.Controls.Add(SmallLabel("Target Output", x, 50));
-            var dd = TargetDropdown(outputs, action.DeviceId, new Point(x, 68), id => { action.DeviceId = id; Apply(); });
+            row.Controls.Add(SmallLabel("Target Output", x, 46));
+            var dd = TargetDropdown(outputs, action.DeviceId, new Point(x, 62), id => { action.DeviceId = id; Apply(); });
             row.Controls.Add(dd);
         }
         else if (action.Type == "cycle_output")
@@ -654,17 +682,17 @@ public sealed class ConfigForm : Form
             while (action.DeviceIds.Count < 2)
                 action.DeviceIds.Add(outputs.ElementAtOrDefault(action.DeviceIds.Count)?.Id ?? outputs.FirstOrDefault()?.Id ?? "");
 
-            row.Controls.Add(SmallLabel("Target 1", x, 50));
-            var dd1 = TargetDropdown(outputs, action.DeviceIds[0], new Point(x, 68), id =>
+            row.Controls.Add(SmallLabel("Target 1", x, 46));
+            var dd1 = TargetDropdown(outputs, action.DeviceIds[0], new Point(x, 62), id =>
             {
                 if (id is not null) action.DeviceIds[0] = id;
                 Apply();
             });
             row.Controls.Add(dd1);
             x += 195;
-            row.Controls.Add(SmallLabel("Target 2", x, 50));
+            row.Controls.Add(SmallLabel("Target 2", x, 46));
             var dd2 = TargetDropdown(outputs, action.DeviceIds.Count > 1 ? action.DeviceIds[1] : null,
-                new Point(x, 68), id =>
+                new Point(x, 62), id =>
                 {
                     if (id is not null) action.DeviceIds[1] = id;
                     Apply();

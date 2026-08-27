@@ -16,6 +16,7 @@ Built by FairTech.
 
 ## Features
 - **Per-key trigger customization:** tap, hold (configurable duration), and double-press actions on any key or combo.
+- **Left/right modifiers:** optionally bind `LSHIFT+H` and `RSHIFT+H` to different actions; hotkeys recorded without a side keep matching either.
 - **System-wide detection:** low-level OS keyboard hook - works regardless of app focus, bypassing Elgato's software limitations.
 - **Smart OS suppression:** mapped keys are swallowed, so binding your keyboard's Volume Mute to a Wave Link channel doesn't also mute Windows.
 - **Actions:** toggle mute, volume up/down (configurable step), set absolute volume, switch output device, cycle output devices. Channel actions can target **All Mixes** or one named mix.
@@ -37,10 +38,14 @@ Run **`Build-Portable.bat`**  output is a single self-contained `dist\WLHK.exe`.
 
 For development: `dotnet run` inside `src/` (JIT mode, no MSVC needed).
 
+Run **`Build-Test.bat`** (or `dotnet test WLHK.slnx`) for the test suite.
+
 ## Usage
 The app lives in your system tray. Double-click the tray icon to open the configuration window; right-click for quick toggles (hotkeys, OSD), reconnect, and quit.
 
 Click **Record New Hotkey**, press the key or combo you want, then enable and configure any of the three triggers (Normal Press / Hold / Double Press) on its card.
+
+Enable **Distinguish L/R Modifiers** in Global Settings to record new hotkeys with side-specific modifiers (`LSHIFT+H`, `RCTRL+RSHIFT+H`), so the left and right modifier keys can trigger different actions. Existing hotkeys are unaffected: a hotkey recorded as `SHIFT+H` still fires for either shift, and a side-specific hotkey takes precedence over the side-agnostic one when both are bound.
 
 For channel actions, choose **All Mixes** to affect the channel everywhere, or select a named mix to affect only that mix. For example, configure Toggle Mute for **Microphone** in the **VC** mix to mute it only in VC while leaving its other mixes unchanged.
 

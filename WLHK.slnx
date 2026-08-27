@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/WLHK.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Wlhk.Tests/Wlhk.Tests.csproj" />
+  </Folder>
+</Solution>

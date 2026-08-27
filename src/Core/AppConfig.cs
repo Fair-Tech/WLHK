@@ -45,6 +45,13 @@ public sealed class AppConfig
     public int VolumeStep { get; set; } = 5;
     public int OsdDurationMs { get; set; } = 2000;
     public int DoublePressMs { get; set; } = 300;
+
+    /// <summary>
+    /// Record new hotkeys with side-specific modifiers (LSHIFT+H rather than
+    /// SHIFT+H) so left and right modifiers can trigger different actions.
+    /// Existing side-agnostic bindings keep matching either side.
+    /// </summary>
+    public bool DistinguishModifierSides { get; set; }
 }
 
 [JsonSourceGenerationOptions(
@@ -92,10 +99,11 @@ public sealed class ConfigStore
         }
     }
 
-    internal ConfigStore(string configPath)
+    /// <summary>Test seam: bind the store to an explicit path instead of resolving one.</summary>
+    internal ConfigStore(string configPath, bool isPortable = false)
     {
         ConfigPath = configPath;
-        IsPortable = true;
+        IsPortable = isPortable;
     }
 
     public void Load()

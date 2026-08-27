@@ -67,6 +67,9 @@ public sealed class KeyboardHook : IDisposable
 
     // Recording mode: capture the next combo instead of dispatching it.
     private volatile Action<string>? _recordingCallback;
+    private volatile bool _recordSideSpecific;
+    // The key captured while recording, so its matching UP is swallowed too.
+    private uint _recordingSwallowVk;
 
     // Hook-thread-only state (no locking needed).
     private readonly Dictionary<uint, string> _activeCombos = new();
@@ -103,8 +106,16 @@ public sealed class KeyboardHook : IDisposable
 
     public void SetEnabled(bool enabled) => _suppressionEnabled = enabled;
 
-    /// <summary>Capture the next key combo (down or up, matching v1) instead of dispatching it.</summary>
-    public void BeginRecording(Action<string> callback) => _recordingCallback = callback;
+    /// <summary>
+    /// Capture the next key combo instead of dispatching it. When
+    /// <paramref name="sideSpecific"/> is set, held modifiers are recorded per
+    /// side (LSHIFT/RSHIFT/...) so left and right can be bound separately.
+    /// </summary>
+    public void BeginRecording(bool sideSpecific, Action<string> callback)
+    {
+        _recordSideSpecific = sideSpecific;
+        _recordingCallback = callback;
+    }
 
     public void CancelRecording() => _recordingCallback = null;
 
@@ -150,10 +161,31 @@ public sealed class KeyboardHook : IDisposable
         if (baseName is null)
             return CallNextHookEx(_hook, nCode, wParam, lParam);
 
+        // Recording mode: swallow the first non-modifier event and report it (v1 behavior,
+        // except the main engine is paused during recording — fixes a v1 quirk where a
+        // mapped key would fire its action while being re-recorded).
+        var recording = _recordingCallback;
+        if (recording is not null)
+        {
+            _recordingCallback = null;
+            _recordingSwallowVk = vk;
+            _activeCombos.Remove(vk);
+            recording(BuildCombo(baseName, _recordSideSpecific));
+            return 1;
+        }
+
+        // Swallow the release of the key that was just recorded, so it cannot
+        // reach the engine as an unpaired UP.
+        if (_recordingSwallowVk != 0 && _recordingSwallowVk == vk)
+        {
+            if (isUp) _recordingSwallowVk = 0;
+            return 1;
+        }
+
         string combo;
         if (isDown)
         {
-            combo = BuildCombo(baseName);
+            combo = ResolveCombo(baseName);
             _activeCombos[vk] = combo;
         }
         else
@@ -162,18 +194,7 @@ public sealed class KeyboardHook : IDisposable
             if (_activeCombos.Remove(vk, out var stored))
                 combo = stored;
             else
-                combo = BuildCombo(baseName);
-        }
-
-        // Recording mode: swallow the first non-modifier event and report it (v1 behavior,
-        // except the main engine is paused during recording — fixes a v1 quirk where a
-        // mapped key would fire its action while being re-recorded).
-        var recording = _recordingCallback;
-        if (recording is not null)
-        {
-            _recordingCallback = null;
-            recording(combo);
-            return 1;
+                combo = ResolveCombo(baseName);
         }
 
         KeyEvent?.Invoke(combo, isDown);
@@ -202,18 +223,50 @@ public sealed class KeyboardHook : IDisposable
         }
     }
 
-    /// <summary>Modifier prefix order matches v1: CTRL+ALT+SHIFT+WIN.</summary>
-    private string BuildCombo(string baseName)
+    /// <summary>
+    /// Picks the combo string this key press should act as. A side-specific
+    /// binding (LSHIFT+H) wins when one exists; otherwise the side-agnostic form
+    /// (SHIFT+H) is used, so bindings recorded before left/right support — and
+    /// bindings deliberately left side-agnostic — keep matching either side.
+    /// </summary>
+    private string ResolveCombo(string baseName)
+    {
+        string specific = BuildCombo(baseName, sideSpecific: true);
+        if (Volatile.Read(ref _suppressSet).Contains(specific))
+            return specific;
+        return BuildCombo(baseName, sideSpecific: false);
+    }
+
+    /// <summary>
+    /// Modifier prefix order matches v1: CTRL+ALT+SHIFT+WIN. In side-specific
+    /// form each held modifier is named by side (LCTRL/RCTRL/...), left before
+    /// right when both are down.
+    /// </summary>
+    private string BuildCombo(string baseName, bool sideSpecific)
     {
         bool ctrl = _lCtrl || _rCtrl, alt = _lAlt || _rAlt, shift = _lShift || _rShift, win = _lWin || _rWin;
         if (!ctrl && !alt && !shift && !win)
             return baseName;
 
-        var sb = new System.Text.StringBuilder(32);
-        if (ctrl) sb.Append("CTRL+");
-        if (alt) sb.Append("ALT+");
-        if (shift) sb.Append("SHIFT+");
-        if (win) sb.Append("WIN+");
+        var sb = new System.Text.StringBuilder(48);
+        if (sideSpecific)
+        {
+            if (_lCtrl) sb.Append("LCTRL+");
+            if (_rCtrl) sb.Append("RCTRL+");
+            if (_lAlt) sb.Append("LALT+");
+            if (_rAlt) sb.Append("RALT+");
+            if (_lShift) sb.Append("LSHIFT+");
+            if (_rShift) sb.Append("RSHIFT+");
+            if (_lWin) sb.Append("LWIN+");
+            if (_rWin) sb.Append("RWIN+");
+        }
+        else
+        {
+            if (ctrl) sb.Append("CTRL+");
+            if (alt) sb.Append("ALT+");
+            if (shift) sb.Append("SHIFT+");
+            if (win) sb.Append("WIN+");
+        }
         sb.Append(baseName);
         return sb.ToString();
     }
