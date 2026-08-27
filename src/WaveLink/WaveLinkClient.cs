@@ -7,10 +7,29 @@ namespace Wlhk.WaveLink;
 
 public sealed class Channel
 {
+    // Instances are immutable by convention once published by WaveLinkClient.
     public string Id = "";
     public string Name = "";
     public bool IsMuted;
     public double Level = 1.0; // 0..1, protocol-native
+    public List<ChannelMix> Mixes = new();
+}
+
+public sealed class ChannelMix
+{
+    // Instances are immutable by convention once published by WaveLinkClient.
+    public string Id = "";
+    public bool IsMuted;
+    public double Level = 1.0;
+}
+
+public sealed class Mix
+{
+    // Instances are immutable by convention once published by WaveLinkClient.
+    public string Id = "";
+    public string Name = "";
+    public bool IsMuted;
+    public double Level = 1.0;
 }
 
 public sealed class OutputDevice
@@ -45,7 +64,7 @@ public sealed class InputDevice
 /// forever (v1 gave up after 5 tries). Manual reconnect and power-resume skip
 /// the current wait.
 /// </summary>
-public sealed class WaveLinkClient : IDisposable
+public sealed class WaveLinkClient : IDisposable, IWaveLinkControl
 {
     public bool IsConnected { get; private set; }
 
@@ -58,9 +77,19 @@ public sealed class WaveLinkClient : IDisposable
     public event Action? ConnectionFailing;
 
     private volatile List<Channel> _channels = new();
+    private volatile List<Mix> _mixes = new();
     private volatile List<OutputDevice> _outputDevices = new();
     private volatile List<InputDevice> _inputDevices = new();
     private volatile string _mainOutputId = "";
+
+    private readonly object _stateLock = new();
+    private readonly Dictionary<ChannelPropertyKey, PropertyProtection> _propertyProtections = new();
+    private long _lastIntentVersion;
+
+    private readonly ConcurrentQueue<MutationRequest> _mutationQueue = new();
+    private readonly Func<string, JsonObject, Task> _mutationSender;
+    private int _mutationPumpRunning;
+    private long _connectionGeneration;
 
     private ClientWebSocket? _ws;
     private readonly SemaphoreSlim _sendLock = new(1, 1);
@@ -72,14 +101,61 @@ public sealed class WaveLinkClient : IDisposable
     private Task? _supervisor;
     private volatile bool _disposed;
 
+    public WaveLinkClient()
+    {
+        _mutationSender = async (method, @params) =>
+            await SendRequestAsync(method, @params).ConfigureAwait(false);
+    }
+
+    internal WaveLinkClient(Func<string, JsonObject, Task> mutationSender)
+    {
+        _mutationSender = mutationSender;
+    }
+
+    private enum ChannelProperty
+    {
+        Level,
+        IsMuted
+    }
+
+    private readonly record struct ChannelPropertyKey(
+        string ChannelId, string? MixId, ChannelProperty Property);
+
+    private sealed record PropertyIntent(long Version, object Value);
+
+    private sealed class PropertyProtection
+    {
+        internal List<PropertyIntent> InFlight { get; } = new();
+        internal List<PropertyIntent> DeliveredGuards { get; } = new();
+        internal PropertyIntent? LatestDeliveredOrConfirmed;
+        internal long? FallbackDeliveredVersion;
+    }
+
+    private const int MaxDeliveredGuardsPerProperty = 16;
+
+    private readonly record struct IntentToken(ChannelPropertyKey Key, long Version);
+
+    private sealed class MutationRequest
+    {
+        internal string? Method;
+        internal JsonObject? Params;
+        internal IReadOnlyList<IntentToken> Intents = [];
+        internal long ConnectionGeneration;
+        internal TaskCompletionSource Completion { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
+
     // ─── Public state accessors (lock-free snapshot reads) ─────────────────────
 
     public IReadOnlyList<Channel> GetChannels() => _channels;
+    public IReadOnlyList<Mix> GetMixes() => _mixes;
     public IReadOnlyList<OutputDevice> GetOutputDevices() => _outputDevices;
     public string MainOutputId => _mainOutputId;
 
     public Channel? GetChannelById(string? id) =>
         id is null ? null : _channels.FirstOrDefault(c => c.Id == id);
+    public Mix? GetMixById(string? id) =>
+        id is null ? null : _mixes.FirstOrDefault(m => m.Id == id);
     public OutputDevice? GetOutputDeviceById(string? id) =>
         id is null ? null : _outputDevices.FirstOrDefault(d => d.Id == id);
     public InputDevice? GetInputDeviceById(string? id) =>
@@ -185,11 +261,13 @@ public sealed class WaveLinkClient : IDisposable
                     throw new InvalidOperationException("Not a Wave Link endpoint");
 
                 var channelsTask = SendRequestAsync("getChannels", null, 5000);
+                var mixesTask = SendRequestAsync("getMixes", null, 5000);
                 var outputsTask = SendRequestAsync("getOutputDevices", null, 5000);
                 var inputsTask = SendRequestAsync("getInputDevices", null, 5000);
-                await Task.WhenAll(channelsTask, outputsTask, inputsTask).ConfigureAwait(false);
+                await Task.WhenAll(channelsTask, mixesTask, outputsTask, inputsTask).ConfigureAwait(false);
 
-                _channels = ParseChannels(channelsTask.Result?["channels"]);
+                ReplaceChannels(channelsTask.Result?["channels"]);
+                ReplaceMixes(mixesTask.Result?["mixes"]);
                 var outputsNode = outputsTask.Result;
                 _outputDevices = ParseOutputDevices(outputsNode?["outputDevices"]);
                 _mainOutputId = outputsNode?["mainOutput"]?["outputDeviceId"]?.GetValue<string>() ?? "";
@@ -281,18 +359,84 @@ public sealed class WaveLinkClient : IDisposable
         }
     }
 
-    /// <summary>Fire-and-forget setter; errors are swallowed (v1 parity — WL echoes state back via notifications).</summary>
-    private void SendNotifySafe(string method, JsonObject @params)
+    /// <summary>
+    /// Enqueues a setter without blocking its caller. One pump awaits each send,
+    /// preserving invocation order while Wave Link echoes state asynchronously.
+    /// </summary>
+    private void SendNotifySafe(
+        string method, JsonObject @params, IReadOnlyList<IntentToken>? intents = null)
     {
-        _ = Task.Run(async () =>
+        EnqueueMutation(new MutationRequest
         {
-            try { await SendRequestAsync(method, @params).ConfigureAwait(false); }
-            catch { }
+            Method = method,
+            Params = @params,
+            Intents = intents ?? [],
+            ConnectionGeneration = Volatile.Read(ref _connectionGeneration)
         });
     }
 
-    private void FailPending()
+    private void EnqueueMutation(MutationRequest request)
     {
+        _mutationQueue.Enqueue(request);
+        if (Interlocked.CompareExchange(ref _mutationPumpRunning, 1, 0) == 0)
+            _ = Task.Run(ProcessMutationQueueAsync);
+    }
+
+    private async Task ProcessMutationQueueAsync()
+    {
+        while (true)
+        {
+            while (_mutationQueue.TryDequeue(out var request))
+            {
+                bool succeeded = request.Method is null;
+                try
+                {
+                    if (request.Method is not null &&
+                        request.ConnectionGeneration == Volatile.Read(ref _connectionGeneration))
+                    {
+                        await _mutationSender(request.Method, request.Params!).ConfigureAwait(false);
+                        succeeded = true;
+                    }
+                }
+                catch
+                {
+                    // Setter failures remain fire-and-forget, matching existing behavior.
+                }
+                finally
+                {
+                    if (request.Intents.Count > 0)
+                    {
+                        if (succeeded)
+                            ResolveDeliveredIntents(request.Intents);
+                        else
+                            ResolveFailedIntents(request.Intents);
+                    }
+                    request.Completion.TrySetResult();
+                }
+            }
+
+            Volatile.Write(ref _mutationPumpRunning, 0);
+            if (_mutationQueue.IsEmpty ||
+                Interlocked.CompareExchange(ref _mutationPumpRunning, 1, 0) != 0)
+                return;
+        }
+    }
+
+    internal Task WaitForMutationQueueAsync()
+    {
+        var barrier = new MutationRequest
+        {
+            ConnectionGeneration = Volatile.Read(ref _connectionGeneration)
+        };
+        EnqueueMutation(barrier);
+        return barrier.Completion.Task;
+    }
+
+    internal void FailPending()
+    {
+        Interlocked.Increment(ref _connectionGeneration);
+        lock (_stateLock)
+            _propertyProtections.Clear();
         foreach (var kv in _pending)
             kv.Value.TrySetException(new WebSocketException("Connection closed"));
         _pending.Clear();
@@ -329,7 +473,7 @@ public sealed class WaveLinkClient : IDisposable
         }
     }
 
-    private void HandleMessage(string raw)
+    internal void HandleMessage(string raw)
     {
         var node = JsonNode.Parse(raw);
         if (node is null) return;
@@ -354,18 +498,28 @@ public sealed class WaveLinkClient : IDisposable
         switch (method)
         {
             case "channelsChanged":
-                _channels = ParseChannels(p["channels"]);
+                ReplaceChannels(p["channels"]);
                 StateChanged?.Invoke();
                 break;
 
             case "channelChanged":
             {
-                var target = GetChannelById(p["id"]?.GetValue<string>());
-                if (target is not null)
+                if (ApplyChannelPatch(p))
                 {
-                    if (p["name"] is JsonNode n) target.Name = n.GetValue<string>();
-                    if (p["isMuted"] is JsonNode m) target.IsMuted = m.GetValue<bool>();
-                    if (p["level"] is JsonNode l) target.Level = l.GetValue<double>();
+                    StateChanged?.Invoke();
+                }
+                break;
+            }
+
+            case "mixesChanged":
+                ReplaceMixes(p["mixes"]);
+                StateChanged?.Invoke();
+                break;
+
+            case "mixChanged":
+            {
+                if (ApplyMixPatch(p))
+                {
                     StateChanged?.Invoke();
                 }
                 break;
@@ -422,23 +576,298 @@ public sealed class WaveLinkClient : IDisposable
         }
     }
 
-    // ─── Parsers (tolerant of extra/missing fields) ─────────────────────────────
+    // ─── Copy-on-write channel / mix publication ──────────────────────────────
 
-    private static List<Channel> ParseChannels(JsonNode? arr)
+    private void ReplaceChannels(JsonNode? node)
     {
-        var list = new List<Channel>();
-        if (arr is JsonArray a)
-            foreach (var n in a)
-                if (n is not null)
-                    list.Add(new Channel
-                    {
-                        Id = n["id"]?.GetValue<string>() ?? "",
-                        Name = n["name"]?.GetValue<string>() ?? "",
-                        IsMuted = n["isMuted"]?.GetValue<bool>() ?? false,
-                        Level = n["level"]?.GetValue<double>() ?? 1.0
-                    });
-        return list;
+        var replacement = WaveLinkProtocol.ParseChannels(node);
+        lock (_stateLock)
+        {
+            _propertyProtections.Clear();
+            PublishChannelCopyLocked(channels =>
+            {
+                channels.Clear();
+                channels.AddRange(replacement);
+                return true;
+            });
+        }
     }
+
+    private bool ApplyChannelPatch(JsonNode patch)
+    {
+        string id = patch["id"]?.GetValue<string>() ?? "";
+        lock (_stateLock)
+        {
+            if (_channels.All(channel => channel.Id != id))
+                return false;
+
+            var filteredPatch = patch.DeepClone().AsObject();
+            FilterProtectedProperty(
+                filteredPatch, "level",
+                new ChannelPropertyKey(id, null, ChannelProperty.Level));
+            FilterProtectedProperty(
+                filteredPatch, "isMuted",
+                new ChannelPropertyKey(id, null, ChannelProperty.IsMuted));
+
+            if (filteredPatch["mixes"] is JsonArray mixes)
+            {
+                foreach (var item in mixes)
+                {
+                    if (item is not JsonObject mixPatch) continue;
+                    string mixId = mixPatch["id"]?.GetValue<string>() ?? "";
+                    if (mixId.Length == 0) continue;
+                    FilterProtectedProperty(
+                        mixPatch, "level",
+                        new ChannelPropertyKey(id, mixId, ChannelProperty.Level));
+                    FilterProtectedProperty(
+                        mixPatch, "isMuted",
+                        new ChannelPropertyKey(id, mixId, ChannelProperty.IsMuted));
+                }
+            }
+
+            return PublishChannelCopyLocked(channels =>
+            {
+                var target = channels.First(channel => channel.Id == id);
+                WaveLinkProtocol.ApplyChannelPatch(target, filteredPatch);
+                return true;
+            });
+        }
+    }
+
+    private bool PublishChannelCopyLocked(Func<List<Channel>, bool> mutation)
+    {
+        var copy = _channels.Select(CloneChannel).ToList();
+        if (!mutation(copy)) return false;
+        _channels = copy;
+        return true;
+    }
+
+    private void ReplaceMixes(JsonNode? node)
+    {
+        var replacement = WaveLinkProtocol.ParseMixes(node);
+        lock (_stateLock)
+        {
+            PublishMixCopyLocked(mixes =>
+            {
+                mixes.Clear();
+                mixes.AddRange(replacement);
+                return true;
+            });
+        }
+    }
+
+    private bool ApplyMixPatch(JsonNode patch)
+    {
+        string id = patch["id"]?.GetValue<string>() ?? "";
+        lock (_stateLock)
+        {
+            if (_mixes.All(mix => mix.Id != id))
+                return false;
+            return PublishMixCopyLocked(mixes =>
+            {
+                var target = mixes.First(mix => mix.Id == id);
+                WaveLinkProtocol.ApplyMixPatch(target, patch);
+                return true;
+            });
+        }
+    }
+
+    private bool PublishMixCopyLocked(Func<List<Mix>, bool> mutation)
+    {
+        var copy = _mixes.Select(CloneMix).ToList();
+        if (!mutation(copy)) return false;
+        _mixes = copy;
+        return true;
+    }
+
+    private static Channel CloneChannel(Channel source) => new()
+    {
+        Id = source.Id,
+        Name = source.Name,
+        IsMuted = source.IsMuted,
+        Level = source.Level,
+        Mixes = source.Mixes.Select(CloneChannelMix).ToList()
+    };
+
+    private static ChannelMix CloneChannelMix(ChannelMix source) => new()
+    {
+        Id = source.Id,
+        IsMuted = source.IsMuted,
+        Level = source.Level
+    };
+
+    private static Mix CloneMix(Mix source) => new()
+    {
+        Id = source.Id,
+        Name = source.Name,
+        IsMuted = source.IsMuted,
+        Level = source.Level
+    };
+
+    private IntentToken RegisterIntentLocked(ChannelPropertyKey key, object value)
+    {
+        long version = ++_lastIntentVersion;
+        if (!_propertyProtections.TryGetValue(key, out var protection))
+        {
+            protection = new PropertyProtection();
+            _propertyProtections[key] = protection;
+        }
+        protection.FallbackDeliveredVersion = null;
+        protection.InFlight.Add(new PropertyIntent(version, value));
+        return new IntentToken(key, version);
+    }
+
+    private void FilterProtectedProperty(
+        JsonObject patch, string propertyName, ChannelPropertyKey key)
+    {
+        if (patch[propertyName] is not JsonNode valueNode) return;
+        object value = key.Property == ChannelProperty.Level
+            ? valueNode.GetValue<double>()
+            : valueNode.GetValue<bool>();
+        if (!ShouldApplyPropertyPatchLocked(key, value))
+            patch.Remove(propertyName);
+    }
+
+    private bool ShouldApplyPropertyPatchLocked(ChannelPropertyKey key, object value)
+    {
+        if (!_propertyProtections.TryGetValue(key, out var protection))
+            return true;
+
+        object currentValue = GetCurrentPropertyValueLocked(key);
+        int inFlightIndex = protection.InFlight.FindLastIndex(
+            intent => PropertyValuesEqual(intent.Value, value));
+        if (inFlightIndex >= 0)
+        {
+            var confirmed = protection.InFlight[inFlightIndex];
+            protection.InFlight.RemoveAt(inFlightIndex);
+            RecordDeliveredOrConfirmedLocked(protection, confirmed, addGuard: false);
+            RemoveProtectionIfResolvedLocked(key, protection);
+            return PropertyValuesEqual(currentValue, value);
+        }
+
+        int deliveredIndex = protection.DeliveredGuards.FindLastIndex(
+            intent => PropertyValuesEqual(intent.Value, value));
+        if (deliveredIndex >= 0)
+        {
+            var delivered = protection.DeliveredGuards[deliveredIndex];
+            bool isFallback =
+                protection.FallbackDeliveredVersion == delivered.Version &&
+                protection.InFlight.All(intent => intent.Version < delivered.Version);
+            protection.DeliveredGuards.RemoveAt(deliveredIndex);
+            if (isFallback)
+                protection.FallbackDeliveredVersion = null;
+            RemoveProtectionIfResolvedLocked(key, protection);
+            return isFallback || PropertyValuesEqual(currentValue, value);
+        }
+
+        // Unknown values cannot supersede a mutation that has not completed.
+        // Once all sends are delivered, accept authoritative state immediately
+        // while retaining bounded one-shot guards for their delayed echoes.
+        bool canApply = protection.InFlight.Count == 0;
+        if (canApply)
+        {
+            protection.FallbackDeliveredVersion = null;
+            protection.LatestDeliveredOrConfirmed = null;
+            RemoveProtectionIfResolvedLocked(key, protection);
+        }
+        return canApply;
+    }
+
+    private object GetCurrentPropertyValueLocked(ChannelPropertyKey key)
+    {
+        var channel = _channels.First(candidate => candidate.Id == key.ChannelId);
+        if (key.MixId is null)
+            return key.Property == ChannelProperty.Level
+                ? channel.Level
+                : channel.IsMuted;
+
+        var mix = channel.Mixes.First(candidate => candidate.Id == key.MixId);
+        return key.Property == ChannelProperty.Level
+            ? mix.Level
+            : mix.IsMuted;
+    }
+
+    private void ResolveDeliveredIntents(IReadOnlyList<IntentToken> intents)
+    {
+        lock (_stateLock)
+        {
+            foreach (var token in intents)
+            {
+                if (!_propertyProtections.TryGetValue(token.Key, out var protection))
+                    continue;
+
+                int intentIndex = protection.InFlight.FindIndex(
+                    intent => intent.Version == token.Version);
+                if (intentIndex < 0) continue;
+
+                var delivered = protection.InFlight[intentIndex];
+                protection.InFlight.RemoveAt(intentIndex);
+                RecordDeliveredOrConfirmedLocked(protection, delivered, addGuard: true);
+            }
+        }
+    }
+
+    private static void RecordDeliveredOrConfirmedLocked(
+        PropertyProtection protection, PropertyIntent intent, bool addGuard)
+    {
+        if (protection.LatestDeliveredOrConfirmed is null ||
+            protection.LatestDeliveredOrConfirmed.Version < intent.Version)
+        {
+            protection.LatestDeliveredOrConfirmed = intent;
+        }
+        if (!addGuard) return;
+
+        protection.DeliveredGuards.RemoveAll(
+            guard => PropertyValuesEqual(guard.Value, intent.Value));
+        protection.DeliveredGuards.Add(intent);
+        if (protection.DeliveredGuards.Count > MaxDeliveredGuardsPerProperty)
+            protection.DeliveredGuards.RemoveAt(0);
+    }
+
+    private void ResolveFailedIntents(IReadOnlyList<IntentToken> intents)
+    {
+        lock (_stateLock)
+        {
+            foreach (var token in intents)
+            {
+                if (!_propertyProtections.TryGetValue(token.Key, out var protection))
+                    continue;
+
+                int failedIndex = protection.InFlight.FindIndex(
+                    intent => intent.Version == token.Version);
+                if (failedIndex < 0) continue;
+
+                bool wasNewest = token.Version ==
+                    protection.InFlight.Max(intent => intent.Version);
+                protection.InFlight.RemoveAt(failedIndex);
+                if (wasNewest)
+                {
+                    var fallback = protection.LatestDeliveredOrConfirmed;
+                    protection.FallbackDeliveredVersion = fallback?.Version;
+                    if (fallback is not null)
+                        RecordDeliveredOrConfirmedLocked(
+                            protection, fallback, addGuard: true);
+                }
+                RemoveProtectionIfResolvedLocked(token.Key, protection);
+            }
+        }
+    }
+
+    private void RemoveProtectionIfResolvedLocked(
+        ChannelPropertyKey key, PropertyProtection protection)
+    {
+        if (protection.InFlight.Count == 0 &&
+            protection.DeliveredGuards.Count == 0 &&
+            protection.LatestDeliveredOrConfirmed is null)
+            _propertyProtections.Remove(key);
+    }
+
+    private static bool PropertyValuesEqual(object left, object right) =>
+        left is double leftDouble && right is double rightDouble
+            ? Math.Abs(leftDouble - rightDouble) < 0.000000001
+            : Equals(left, right);
+
+    // ─── Parsers (tolerant of extra/missing fields) ─────────────────────────────
 
     private static List<OutputDevice> ParseOutputDevices(JsonNode? arr)
     {
@@ -486,15 +915,69 @@ public sealed class WaveLinkClient : IDisposable
         var p = new JsonObject { ["id"] = id };
         if (level is double l) p["level"] = l;
         if (isMuted is bool m) p["isMuted"] = m;
-        SendNotifySafe("setChannel", p);
 
-        // Optimistic local update so rapid repeated hotkeys (volume ramp) read fresh state
-        // without waiting for the notification round-trip.
-        var ch = GetChannelById(id);
-        if (ch is not null)
+        lock (_stateLock)
         {
-            if (level is double l2) ch.Level = l2;
-            if (isMuted is bool m2) ch.IsMuted = m2;
+            var intents = new List<IntentToken>();
+            if (_channels.Any(channel => channel.Id == id))
+            {
+                PublishChannelCopyLocked(channels =>
+                {
+                    var channel = channels.First(candidate => candidate.Id == id);
+                    if (level is double nextLevel)
+                    {
+                        channel.Level = nextLevel;
+                        intents.Add(RegisterIntentLocked(
+                            new ChannelPropertyKey(id, null, ChannelProperty.Level), nextLevel));
+                    }
+                    if (isMuted is bool nextMuted)
+                    {
+                        channel.IsMuted = nextMuted;
+                        intents.Add(RegisterIntentLocked(
+                            new ChannelPropertyKey(id, null, ChannelProperty.IsMuted), nextMuted));
+                    }
+                    return true;
+                });
+            }
+
+            // Queue while holding the publication lock so a later optimistic
+            // write cannot overtake this mutation between publish and enqueue.
+            SendNotifySafe("setChannel", p, intents);
+        }
+    }
+
+    public void SetChannelMix(string channelId, string mixId, double? level = null, bool? isMuted = null)
+    {
+        var p = WaveLinkProtocol.BuildSetChannelMixParams(channelId, mixId, level, isMuted);
+        lock (_stateLock)
+        {
+            var intents = new List<IntentToken>();
+            if (!_channels.Any(channel =>
+                channel.Id == channelId && channel.Mixes.Any(mix => mix.Id == mixId)))
+                return;
+
+            PublishChannelCopyLocked(channels =>
+            {
+                var mix = channels.First(channel => channel.Id == channelId)
+                    .Mixes.First(candidate => candidate.Id == mixId);
+                if (level is double nextLevel)
+                {
+                    mix.Level = nextLevel;
+                    intents.Add(RegisterIntentLocked(
+                        new ChannelPropertyKey(channelId, mixId, ChannelProperty.Level),
+                        nextLevel));
+                }
+                if (isMuted is bool nextMuted)
+                {
+                    mix.IsMuted = nextMuted;
+                    intents.Add(RegisterIntentLocked(
+                        new ChannelPropertyKey(channelId, mixId, ChannelProperty.IsMuted),
+                        nextMuted));
+                }
+                return true;
+            });
+
+            SendNotifySafe("setChannel", p, intents);
         }
     }
 
@@ -524,6 +1007,7 @@ public sealed class WaveLinkClient : IDisposable
         _disposed = true;
         _cts.Cancel();
         try { _ws?.Abort(); } catch { }
+        FailPending();
         _wakeSignal.Release();
     }
 }

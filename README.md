@@ -1,6 +1,6 @@
 # Wave Link Hotkey Manager (WLHK) 2.0
 
-Wave Link Hotkey Manager is a lightweight background utility that provides system-wide custom hotkey support for Elgato Wave Link. Configure tap, hold, and double-press actions per key for muting channels, adjusting volume, and switching output devices — natively on Windows, without a Stream Deck.
+Wave Link Hotkey Manager is a lightweight background utility that provides system-wide custom hotkey support for Elgato Wave Link features. Configure tap, hold, and double-press actions per key for muting channels, adjusting volume, and switching output devices - natively on Windows, without a Stream Deck.
 
 Built by FairTech.
 
@@ -16,11 +16,11 @@ Built by FairTech.
 
 ## Features
 - **Per-key trigger customization:** tap, hold (configurable duration), and double-press actions on any key or combo.
-- **System-wide detection:** low-level OS keyboard hook — works regardless of app focus, bypassing Elgato's software limitations.
+- **System-wide detection:** low-level OS keyboard hook - works regardless of app focus, bypassing Elgato's software limitations.
 - **Smart OS suppression:** mapped keys are swallowed, so binding your keyboard's Volume Mute to a Wave Link channel doesn't also mute Windows.
-- **Actions:** toggle mute, volume up/down (configurable step), set absolute volume, switch output device, cycle output devices.
+- **Actions:** toggle mute, volume up/down (configurable step), set absolute volume, switch output device, cycle output devices. Channel actions can target **All Mixes** or one named mix.
 - **On-Screen Display:** frameless dark overlay with 9 anchor positions, shown on the monitor your cursor is on; text and volume-bar modes; configurable duration.
-- **Auto-reconnect:** finds Wave Link via its `ws-info.json` port file (with a 1884–1893 scan fallback) and retries forever with backoff — at boot, after sleep/wake, or if Wave Link restarts.
+- **Auto-reconnect:** finds Wave Link via its `ws-info.json` port file (with a 1884–1893 scan fallback) and retries forever with backoff - at boot, after sleep/wake, or if Wave Link restarts.
 - **Start with Windows**, **auto-elevate to Admin** (for hotkeys in elevated apps), single-instance, light/dark mode.
 - **Portable data mode:** create a `WLHK_data` folder next to `WLHK.exe` and all settings live there instead of `%APPDATA%\WLHK`.
 - **v1 config migration:** existing v1 hotkey configs are picked up automatically on first run.
@@ -33,7 +33,7 @@ Built by FairTech.
 - .NET 10 SDK
 - Visual Studio 2022+ with the "Desktop development with C++" workload (the Native AOT linker needs MSVC)
 
-Run **`Build-Portable.bat`** — output is a single self-contained `dist\WLHK.exe`.
+Run **`Build-Portable.bat`**  output is a single self-contained `dist\WLHK.exe`.
 
 For development: `dotnet run` inside `src/` (JIT mode, no MSVC needed).
 
@@ -42,11 +42,15 @@ The app lives in your system tray. Double-click the tray icon to open the config
 
 Click **Record New Hotkey**, press the key or combo you want, then enable and configure any of the three triggers (Normal Press / Hold / Double Press) on its card.
 
+For channel actions, choose **All Mixes** to affect the channel everywhere, or select a named mix to affect only that mix. For example, configure Toggle Mute for **Microphone** in the **VC** mix to mute it only in VC while leaving its other mixes unchanged.
+
 **Running as Administrator** is recommended if you use hotkeys while focused on elevated apps (Task Manager, some games). Enable "Auto-Elevate to Admin on Start" in Global Settings. The `--no-elevate` command-line flag skips auto-elevation for a single launch.
 
 > **Note on Antivirus:** the global keyboard hook (`SetWindowsHookEx`) can trigger false positives in some AV products. The source is open for inspection; add an exclusion if needed.
 
 ## Credits, Acknowledgments, & Disclaimers
-The Wave Link WebSocket protocol handling in v1 was based on [node-wave-link-sdk](https://github.com/DarrellVS/node-wave-link-sdk) by [@darrellvs](https://github.com/darrellvs) — v2's native client is a from-scratch implementation of the same protocol, and that library's existence made both versions dramatically easier to build.
+The Wave Link WebSocket protocol handling in v1 was based on [node-wave-link-sdk](https://github.com/DarrellVS/node-wave-link-sdk) by [@darrellvs](https://github.com/darrellvs) - v2's native client is a from-scratch implementation of the same protocol, and that library's existence made both versions dramatically easier to build.
 
 This utility is not affiliated with, endorsed by, or sponsored by Elgato or Corsair. Elgato and Wave Link are trademarks of their respective owners. I just don't like how they lock down their ecosystem. (But opening Wave Link software for any mic is a HUGE step in the right direction! Thanks Elgato!)
+
+This utility is built with minimal AI input, generally limited to auto-completion, commit descriptions, and automated debugging processes. No "Make No Mistakes" here, there will be plenty of them. 

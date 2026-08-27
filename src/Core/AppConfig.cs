@@ -11,6 +11,7 @@ public sealed class HotkeyAction
 {
     public string Type { get; set; } = "mute_channel";
     public string? ChannelId { get; set; }
+    public string? MixId { get; set; }
     public string? DeviceId { get; set; }
     public List<string>? DeviceIds { get; set; }
     /// <summary>Hold time in ms (holdAction only).</summary>
@@ -89,6 +90,12 @@ public sealed class ConfigStore
             Directory.CreateDirectory(dir);
             ConfigPath = Path.Combine(dir, "config.json");
         }
+    }
+
+    internal ConfigStore(string configPath)
+    {
+        ConfigPath = configPath;
+        IsPortable = true;
     }
 
     public void Load()
