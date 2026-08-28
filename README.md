@@ -1,10 +1,10 @@
-# Wave Link Hotkey Manager (WLHK) 2.0
+# Wave Link Hotkey Manager (WLHK) 2.5
 
 Wave Link Hotkey Manager is a lightweight background utility that provides system-wide custom hotkey support for Elgato Wave Link features. Configure tap, hold, and double-press actions per key for muting channels, adjusting volume, and switching output devices - natively on Windows, without a Stream Deck.
 
 Built by FairTech.
 
-**v2.0 is a ground-up rewrite in C# / .NET Native AOT.** The Electron runtime is gone:
+**v2.5 is a ground-up rewrite in C# / .NET Native AOT.** The Electron runtime is gone:
 
 |  | v1 (Electron) | v2 (Native AOT) |
 |---|---|---|
