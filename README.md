@@ -34,7 +34,7 @@ Built by FairTech.
 - .NET 10 SDK
 - Visual Studio 2022+ with the "Desktop development with C++" workload (the Native AOT linker needs MSVC)
 
-Run **`Build-Portable.bat`**  output is a single self-contained `dist\WLHK.exe`.
+Run **`Build-Portable.bat`** - output is a single self-contained `dist\WLHK.exe`.
 
 For development: `dotnet run` inside `src/` (JIT mode, no MSVC needed).
 
@@ -58,4 +58,4 @@ The Wave Link WebSocket protocol handling in v1 was based on [node-wave-link-sdk
 
 This utility is not affiliated with, endorsed by, or sponsored by Elgato or Corsair. Elgato and Wave Link are trademarks of their respective owners. I just don't like how they lock down their ecosystem. (But opening Wave Link software for any mic is a HUGE step in the right direction! Thanks Elgato!)
 
-This utility is built with minimal AI input, generally limited to auto-completion, commit descriptions, and automated debugging processes. No "Make No Mistakes" here, there will be plenty of them. 
+This utility is built with minimal AI input, generally limited to auto-completion, commit descriptions, and automated debugging processes. No "Make No Mistakes" here, there will be plenty of them.
