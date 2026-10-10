@@ -143,6 +143,14 @@ public sealed class KeyboardHook : IDisposable
             return CallNextHookEx(_hook, nCode, wParam, lParam);
 
         var data = Marshal.PtrToStructure<KBDLLHOOKSTRUCT>(lParam);
+
+        // Media keys we injected ourselves: pass straight through. Otherwise a
+        // hotkey whose action sends a media key that is itself mapped would
+        // retrigger the engine, and a key mapped to its own media action would
+        // loop until the queue gave out.
+        if ((nuint)data.dwExtraInfo == MediaKeySender.InjectedTag)
+            return CallNextHookEx(_hook, nCode, wParam, lParam);
+
         int msg = (int)wParam;
         bool isDown = msg is WM_KEYDOWN or WM_SYSKEYDOWN;
         bool isUp = msg is WM_KEYUP or WM_SYSKEYUP;

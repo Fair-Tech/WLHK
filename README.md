@@ -1,10 +1,10 @@
-# Wave Link Hotkey Manager (WLHK) 2.5
+# Wave Link Hotkey Manager (WLHK) 2.6
 
 Wave Link Hotkey Manager is a lightweight background utility that provides system-wide custom hotkey support for Elgato Wave Link features. Configure tap, hold, and double-press actions per key for muting channels, adjusting volume, and switching output devices - natively on Windows, without a Stream Deck.
 
 Built by FairTech.
 
-**v2.5 is a ground-up rewrite in C# / .NET Native AOT.** The Electron runtime is gone:
+**v2 is a ground-up rewrite in C# / .NET Native AOT.** The Electron runtime is gone:
 
 |  | v1 (Electron) | v2 (Native AOT) |
 |---|---|---|
@@ -20,6 +20,7 @@ Built by FairTech.
 - **System-wide detection:** low-level OS keyboard hook - works regardless of app focus, bypassing Elgato's software limitations.
 - **Smart OS suppression:** mapped keys are swallowed, so binding your keyboard's Volume Mute to a Wave Link channel doesn't also mute Windows.
 - **Actions:** toggle mute, volume up/down (configurable step), set absolute volume, switch output device, cycle output devices. Channel actions can target **All Mixes** or one named mix.
+- **Media controls:** Play/Pause, Next, Previous, Stop and system volume up/down for your Windows default output device. Handled by Windows, so they work with any player and don't need Wave Link running.
 - **On-Screen Display:** frameless dark overlay with 9 anchor positions, shown on the monitor your cursor is on; text and volume-bar modes; configurable duration.
 - **Auto-reconnect:** finds Wave Link via its `ws-info.json` port file (with a 1884–1893 scan fallback) and retries forever with backoff - at boot, after sleep/wake, or if Wave Link restarts.
 - **Start with Windows**, **auto-elevate to Admin** (for hotkeys in elevated apps), single-instance, light/dark mode.
@@ -46,6 +47,8 @@ The app lives in your system tray. Double-click the tray icon to open the config
 Click **Record New Hotkey**, press the key or combo you want, then enable and configure any of the three triggers (Normal Press / Hold / Double Press) on its card.
 
 Enable **Distinguish L/R Modifiers** in Global Settings to record new hotkeys with side-specific modifiers (`LSHIFT+H`, `RCTRL+RSHIFT+H`), so the left and right modifier keys can trigger different actions. Existing hotkeys are unaffected: a hotkey recorded as `SHIFT+H` still fires for either shift, and a side-specific hotkey takes precedence over the side-agnostic one when both are bound.
+
+Media actions (Play / Pause, Next, Previous, Stop, System Volume Up/Down) press the matching Windows media key, so they reach whichever app currently has media control and move the volume of your default output device. They work whether or not Wave Link is running, and they're safe to bind to the physical media keys themselves: WLHK ignores the keypresses it generates, so nothing loops.
 
 For channel actions, choose **All Mixes** to affect the channel everywhere, or select a named mix to affect only that mix. For example, configure Toggle Mute for **Microphone** in the **VC** mix to mute it only in VC while leaving its other mixes unchanged.
 

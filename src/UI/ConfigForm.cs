@@ -40,7 +40,16 @@ public sealed class ConfigForm : Form
         ("set_volume", "Set Volume"),
         ("switch_output", "Switch Output Device"),
         ("cycle_output", "Cycle Output Devices"),
+        ("media_play_pause", "Media: Play / Pause"),
+        ("media_next", "Media: Next Track"),
+        ("media_previous", "Media: Previous Track"),
+        ("media_stop", "Media: Stop"),
+        ("media_volume_up", "System: Volume Up"),
+        ("media_volume_down", "System: Volume Down"),
     };
+
+    /// <summary>Action types that act on Windows and so need no Wave Link target.</summary>
+    private static bool IsMediaAction(string type) => type.StartsWith("media_", StringComparison.Ordinal);
 
     public ConfigForm(ConfigStore store, WaveLinkClient wl, KeyboardHook hook,
         Action onConfigApplied, Action onReconnect, Action onRelaunchAdmin, Icon appIcon)
@@ -599,7 +608,7 @@ public sealed class ConfigForm : Form
 
         // Action type
         row.Controls.Add(SmallLabel("Action", x, 4));
-        var ddType = new ComboBox { Location = new Point(x, 20), Width = 165, DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat };
+        var ddType = new ComboBox { Location = new Point(x, 20), Width = 190, DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat };
         foreach (var (_, lbl2) in ActionTypes) ddType.Items.Add(lbl2);
         ddType.SelectedIndex = Math.Max(0, Array.FindIndex(ActionTypes, a => a.Type == action!.Type));
         ddType.SelectedIndexChanged += (_, _) =>
@@ -608,7 +617,15 @@ public sealed class ConfigForm : Form
             action!.Type = ActionTypes[ddType.SelectedIndex].Type;
             // Output actions cannot retain either half of a channel/mix target.
             // Channel actions deliberately preserve both IDs when switching types.
-            if (action.Type is "switch_output" or "cycle_output")
+            if (IsMediaAction(action.Type))
+            {
+                // Windows media actions have no target at all.
+                action.ChannelId = null;
+                action.MixId = null;
+                action.DeviceId = null;
+                action.DeviceIds = null;
+            }
+            else if (action.Type is "switch_output" or "cycle_output")
             {
                 action.ChannelId = null;
                 action.MixId = null;
@@ -698,6 +715,19 @@ public sealed class ConfigForm : Form
                     Apply();
                 });
             row.Controls.Add(dd2);
+        }
+        else if (IsMediaAction(action.Type))
+        {
+            row.Controls.Add(new Label
+            {
+                Text = action.Type is "media_volume_up" or "media_volume_down"
+                    ? "Controls the Windows default output device."
+                    : "Sent to whichever app currently has media control.",
+                Location = new Point(x, 50),
+                AutoSize = true,
+                ForeColor = _t.Subtle,
+                Font = new Font("Segoe UI", 9f, FontStyle.Italic)
+            });
         }
 
         if (showHold)

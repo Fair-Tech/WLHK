@@ -7,20 +7,29 @@ public sealed class HotkeyActionExecutor
     private readonly Func<AppConfig> _getConfig;
     private readonly IWaveLinkControl _wl;
     private readonly Action<string, string?, int?> _showOsd;
+    private readonly IMediaKeySender _media;
 
     public HotkeyActionExecutor(
         Func<AppConfig> getConfig,
         IWaveLinkControl wl,
-        Action<string, string?, int?> showOsd)
+        Action<string, string?, int?> showOsd,
+        IMediaKeySender? media = null)
     {
         _getConfig = getConfig;
         _wl = wl;
         _showOsd = showOsd;
+        _media = media ?? new MediaKeySender();
     }
 
     public void Execute(HotkeyAction? action)
     {
         if (action is null) return;
+
+        // Media actions go to Windows, not Wave Link, so they must run before the
+        // connection check: muting a channel needs Wave Link, pausing Spotify
+        // does not.
+        if (TryExecuteMedia(action)) return;
+
         if (!_wl.IsConnected)
         {
             _showOsd("Wave Link Disconnected", "Failed", null);
@@ -36,6 +45,37 @@ public sealed class HotkeyActionExecutor
             case "switch_output": SwitchOutput(action); break;
             case "cycle_output": CycleOutput(action); break;
         }
+    }
+
+    /// <summary>
+    /// Handles the Windows media actions. Returns false for anything else so the
+    /// Wave Link path can take it.
+    ///
+    /// Transport actions get an OSD because Windows shows nothing for them unless
+    /// the player happens to; the volume ones deliberately don't, since Windows
+    /// already puts its own volume bar on screen and two overlays for one
+    /// keypress is just noise.
+    /// </summary>
+    private bool TryExecuteMedia(HotkeyAction action)
+    {
+        switch (action.Type)
+        {
+            case "media_play_pause": return Media(MediaKey.PlayPause, "Play / Pause");
+            case "media_next": return Media(MediaKey.NextTrack, "Next Track");
+            case "media_previous": return Media(MediaKey.PreviousTrack, "Previous Track");
+            case "media_stop": return Media(MediaKey.Stop, "Stop");
+            case "media_volume_up": return Media(MediaKey.VolumeUp, null);
+            case "media_volume_down": return Media(MediaKey.VolumeDown, null);
+            default: return false;
+        }
+    }
+
+    private bool Media(MediaKey key, string? osdValue)
+    {
+        _media.Send(key);
+        if (osdValue is not null)
+            _showOsd("Media", osdValue, null);
+        return true;
     }
 
     private int ResolveStep(HotkeyAction action)
