@@ -4,14 +4,14 @@ public enum ModifierFamily { Ctrl, Alt, Shift, Win }
 
 /// <summary>
 /// Everything the hook and engine need to act on a config: the recorded hotkeys
-/// plus the bindings Global Features synthesises for native keys.
+/// plus the bindings the Volume Keys setting synthesises for the keyboard volume keys.
 ///
-/// Global Features are expressed as ordinary bindings rather than special cases,
+/// The Volume Keys setting is expressed as ordinary bindings rather than special cases,
 /// so hold, repeat, OSD and Active Target behave identically whether a key was
-/// recorded or switched on in Global Features. Recorded hotkeys take priority:
+/// recorded or taken over by the Volume Keys setting. Recorded hotkeys take priority:
 /// a synthesised action only fills a trigger the recorded binding leaves empty,
 /// so a recorded "hold VOLUME_MUTE to cycle outputs" keeps working alongside the
-/// global "tap to mute".
+/// synthesised "tap to mute".
 /// </summary>
 public sealed class EffectiveBindings
 {
@@ -28,7 +28,7 @@ public sealed class EffectiveBindings
     public IReadOnlySet<string> Dynamic { get; private init; } = new HashSet<string>();
 
     /// <summary>
-    /// Combos that exist only because of Global Features. The hook lets these
+    /// Combos that exist only because of the Volume Keys setting. The hook lets these
     /// through to Windows while Wave Link is disconnected, so taking over the
     /// volume keys never leaves you with no volume control at all.
     /// </summary>
@@ -45,21 +45,13 @@ public sealed class EffectiveBindings
                 bindings[combo] = binding;
 
         var globalOnly = new HashSet<string>(StringComparer.Ordinal);
-        var gf = config.GlobalFeatures ?? new GlobalFeatures();
 
-        if (gf.VolumeKeys == "wavelink")
+        if (config.VolumeKeys == "wavelink")
         {
             AddGlobal("VOLUME_UP", ActiveVolume("up"), autoRepeat: true);
             AddGlobal("VOLUME_DOWN", ActiveVolume("down"), autoRepeat: true);
             AddGlobal("VOLUME_MUTE", ActiveMute(), autoRepeat: false);
         }
-        if (gf.TrackKeys == "target")
-        {
-            AddGlobal("MEDIA_NEXT_TRACK", TargetAction("next"), autoRepeat: false);
-            AddGlobal("MEDIA_PREV_TRACK", TargetAction("previous"), autoRepeat: false);
-        }
-        if (gf.PlayPauseKey == "mute")
-            AddGlobal("MEDIA_PLAY_PAUSE", ActiveMute(), autoRepeat: false);
 
         var dynamic = new HashSet<string>(StringComparer.Ordinal);
         foreach (var (combo, binding) in bindings)
@@ -114,15 +106,12 @@ public sealed class EffectiveBindings
     };
 
     private static bool UsesActiveTarget(HotkeyAction? action) =>
-        action is not null && action.UseActiveTarget == true &&
-        ActionCatalog.IsChannelKind(ActionCatalog.Resolve(action).Kind);
+        action is not null && ActionCatalog.IsScoped(ActionCatalog.Resolve(action).Kind) &&
+        ActionCatalog.ScopeOf(action) == ActionCatalog.ScopeActive;
 
     private static HotkeyAction ActiveVolume(string mode) =>
-        new() { Type = ActionCatalog.Volume, Mode = mode, UseActiveTarget = true };
+        new() { Type = ActionCatalog.Volume, Mode = mode, Scope = ActionCatalog.ScopeActive };
 
     private static HotkeyAction ActiveMute() =>
-        new() { Type = ActionCatalog.Mute, Mode = "toggle", UseActiveTarget = true };
-
-    private static HotkeyAction TargetAction(string mode) =>
-        new() { Type = ActionCatalog.Target, Mode = mode };
+        new() { Type = ActionCatalog.Mute, Mode = "toggle", Scope = ActionCatalog.ScopeActive };
 }

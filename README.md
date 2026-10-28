@@ -19,10 +19,13 @@ Built by FairTech.
 - **Left/right modifiers:** optionally bind `LSHIFT+H` and `RSHIFT+H` to different actions; hotkeys recorded without a side keep matching either.
 - **System-wide detection:** low-level OS keyboard hook - works regardless of app focus, bypassing Elgato's software limitations.
 - **Smart OS suppression:** mapped keys are swallowed, so binding your keyboard's Volume Mute to a Wave Link channel doesn't also mute Windows.
-- **Actions:** Mute (toggle, mute or unmute), Volume (up, down or set a level), switch output device, cycle output devices, media keys, and Change Target. Channel actions can target **All Mixes**, one named mix, or the **Active Target**. Each action can show or hide the OSD on its own.
+- **Actions:** Mute (toggle, mute or unmute) and Volume (up, down or set a level) for a channel, a channel in one mix, a whole mix, an output device, the **Active Target**, or the focused app's channel. Plus Microphone, Effect, switch/cycle output device, Move Focused App, Focused App Volume, media keys and Change Target. Each action can show or hide the OSD on its own.
+- **Microphone:** hardware mute, gain up/down/set in dB, the Wave's Mic/PC monitor mix, and gain lock.
+- **Effects:** turn a channel's effects (noise gate, EQ, ...) on or off.
+- **Focused app:** move the focused app to another Wave Link channel, or change its own volume the way the Windows Volume Mixer does.
 - **Media controls:** Play/Pause, Next, Previous, Stop and system volume up/down/mute for your Windows default output device. Handled by Windows, so they work with any player and don't need Wave Link running.
-- **Active Target:** keep a list of channel + mix targets and switch which one your hotkeys control, by cycling, picking one, holding a hotkey, or holding a modifier.
-- **Global Features:** hand your keyboard's volume keys, track keys or play/pause key over to Wave Link without recording a hotkey for each. They fall back to Windows whenever Wave Link isn't connected.
+- **Active Target:** keep a list of targets (channels, mixes, outputs, or the focused app's channel) and switch which one your hotkeys control, by cycling, picking one, holding a hotkey, or holding a modifier. Optionally remembered across restarts.
+- **Volume keys:** hand your keyboard's volume keys over to the Active Target without recording a hotkey for each. They fall back to Windows whenever Wave Link isn't connected.
 - **On-Screen Display:** frameless dark overlay with 9 anchor positions, shown on the monitor your cursor is on; text and volume-bar modes; configurable duration.
 - **Auto-reconnect:** finds Wave Link via its `ws-info.json` port file (with a 1884–1893 scan fallback) and retries forever with backoff - at boot, after sleep/wake, or if Wave Link restarts.
 - **Start with Windows**, **auto-elevate to Admin** (for hotkeys in elevated apps), single-instance, light/dark mode.
@@ -52,27 +55,30 @@ Enable **Distinguish L/R Modifiers** in Global Settings to record new hotkeys wi
 
 Each trigger picks an **Action** and, where it has one, a **Mode**: Mute can Toggle, Mute or Unmute (the last two always send that state, so other programs watching Wave Link can rely on them as on/off signals), and Volume can go Up, Down or Set Level. Untick **OSD** on any action to keep it silent.
 
-On a **Hold** trigger, volume steps, track skips and target cycling can be set to **Repeat** every so many milliseconds for as long as the key is held, so a held hotkey ramps the volume instead of needing to be tapped.
+On a **Hold** trigger, volume and gain steps, track skips and target cycling can be set to **Repeat** every so many milliseconds for as long as the key is held, so a held hotkey ramps the volume instead of needing to be tapped. With Repeat on, the interval also decides when a press becomes a hold, so **Hold Time** is greyed out. If the same key has a Normal Press or Double Press action, the first repeat waits at least 250 ms so quick taps still count as taps.
+
+When a key has both a **Normal Press** and a **Double Press** action, a single press waits out the double-press window before running, so a double press runs only the Double Press action.
 
 ### Active Target
 
-Under **Global Features**, build an **Active Target list** of channel + mix pairs (for example *Browser, All Mixes* and *Wave Mic, Stream Mix*). Then set any Mute or Volume action's Target Channel to **Active Target** and it controls whichever entry is active. Switch the active entry with a **Change Target** action:
+In **Global Settings**, build an **Active Target list**. An entry can be a channel (in all mixes or one), a whole mix, an output device, or **Focused App's Channel**, which follows whatever app has focus. Then set any Mute, Volume or Effect action's Target to **Active Target** and it controls whichever entry is active. Switch the active entry with a **Change Target** action:
 
 - **Next Target / Previous Target** step through the list.
 - **Select Target** jumps straight to one entry.
 - **Target While Held** aims at an entry only while that key is held, then switches back. Use it on a Hold trigger, or on a Normal Press with nothing else set.
 
-Each entry can also have a **Hold** modifier. Holding it while pressing an Active Target hotkey aims that one press at the entry: give *Wave Mic* the Shift modifier, and `SHIFT+F13` runs your `F13` volume hotkey against the mic. A hotkey you've actually recorded as `SHIFT+F13` always takes priority. The list starts on its first entry each time WLHK launches.
+Each entry can also have a **Hold** modifier. Holding it while pressing an Active Target hotkey aims that one press at the entry: give *Wave Mic* the Shift modifier, and `SHIFT+F13` runs your `F13` volume hotkey against the mic. A hotkey you've actually recorded as `SHIFT+F13` always takes priority. The list starts on its first entry each time WLHK launches, unless **Persistent Target** is ticked, in which case it picks up where you left it.
 
-### Global Features
+### Volume Keys
 
-Rather than recording `VOLUME_UP`, `VOLUME_DOWN` and `VOLUME_MUTE` one at a time, **Global Features** can take over whole groups of native keys:
+Rather than recording `VOLUME_UP`, `VOLUME_DOWN` and `VOLUME_MUTE` one at a time, set **Keyboard volume keys** to **Control the Active Target** in Global Settings. They ramp on the keyboard's own key repeat like the native keys do, and only take over while Wave Link is connected, so you never end up with volume keys that do nothing. A recorded hotkey for the same key keeps priority, and this only fills in triggers it leaves empty. Target modifiers work here too, and a modifier that isn't assigned to a target falls through to Windows, so `CTRL+VOLUME_UP` still changes the Windows volume.
 
-- **Volume keys** control the Active Target, ramping on the keyboard's own key repeat like the native keys do.
-- **Track keys** (Next / Previous) switch the Active Target.
-- **Play / Pause** mutes the Active Target.
+### Microphone, effects and apps
 
-They only take over while Wave Link is connected, so you never end up with volume keys that do nothing. A recorded hotkey for the same key keeps priority, and Global Features only fill in triggers it leaves empty. Target modifiers work here too, and a modifier that isn't assigned to a target falls through to Windows, so `CTRL+VOLUME_UP` still changes the Windows volume.
+- **Microphone** controls the mic itself rather than a channel: hardware mute (the Wave's mute light), **gain** in whole dB within the device's range, the Wave's **Mic/PC mix** (the monitoring balance in your headphones), and **gain lock**. Mics without a feature say so on the OSD instead of guessing.
+- **Effect** turns one of a channel's effects on or off. On a fixed channel you pick the effect itself; on the Active Target or the focused app's channel it's matched by name, so one hotkey can toggle *Noise Gate* on whichever channel is active.
+- **Move Focused App** routes the app Wave Link sees as focused to a channel you pick.
+- **Focused App Volume** changes the focused app's own volume, exactly like its slider in the Windows Volume Mixer. It works across every playback device, including each Wave Link channel, and covers apps that play from a helper process, like browsers and Discord. It doesn't need Wave Link running.
 
 Media actions (Play / Pause, Next, Previous, Stop, System Volume Up/Down/Mute) press the matching Windows media key, so they reach whichever app currently has media control and move the volume of your default output device. They work whether or not Wave Link is running, and they're safe to bind to the physical media keys themselves: WLHK ignores the keypresses it generates, so nothing loops.
 

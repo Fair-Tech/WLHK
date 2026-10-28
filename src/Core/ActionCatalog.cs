@@ -15,18 +15,33 @@ public static class ActionCatalog
 {
     public const string Mute = "mute";
     public const string Volume = "volume";
+    public const string Microphone = "mic";
+    public const string Effect = "effect";
     public const string SwitchOutput = "switch_output";
     public const string CycleOutput = "cycle_output";
+    public const string RouteApp = "route_app";
+    public const string AppVolume = "app_volume";
     public const string Media = "media";
     public const string Target = "target";
+
+    // What a Mute / Volume / Effect action aims at (HotkeyAction.Scope).
+    public const string ScopeChannel = "channel";
+    public const string ScopeActive = "active";
+    public const string ScopeFocusedApp = "focused_app";
+    public const string ScopeMix = "mix";
+    public const string ScopeOutput = "output";
 
     /// <summary>Editor order and labels.</summary>
     public static readonly (string Kind, string Label)[] Kinds =
     {
         (Mute, "Mute"),
         (Volume, "Volume"),
+        (Microphone, "Microphone"),
+        (Effect, "Effect"),
         (SwitchOutput, "Switch Output Device"),
         (CycleOutput, "Cycle Output Devices"),
+        (RouteApp, "Move Focused App"),
+        (AppVolume, "Focused App Volume"),
         (Media, "Media Key"),
         (Target, "Change Target"),
     };
@@ -36,6 +51,19 @@ public static class ActionCatalog
     {
         Mute => [("toggle", "Toggle"), ("mute", "Mute"), ("unmute", "Unmute")],
         Volume => [("up", "Up"), ("down", "Down"), ("set", "Set Level")],
+        Microphone =>
+        [
+            ("mute_toggle", "Toggle Mute"), ("mute", "Mute"), ("unmute", "Unmute"),
+            ("gain_up", "Gain Up"), ("gain_down", "Gain Down"), ("gain_set", "Set Gain"),
+            ("mix_up", "Mic/PC Mix Up"), ("mix_down", "Mic/PC Mix Down"), ("mix_set", "Set Mic/PC Mix"),
+            ("lock_toggle", "Toggle Gain Lock")
+        ],
+        Effect => [("toggle", "Toggle"), ("enable", "Turn On"), ("disable", "Turn Off")],
+        AppVolume =>
+        [
+            ("up", "Up"), ("down", "Down"), ("set", "Set Level"),
+            ("toggle_mute", "Toggle Mute"), ("mute", "Mute"), ("unmute", "Unmute")
+        ],
         Media =>
         [
             ("play_pause", "Play / Pause"), ("next", "Next Track"), ("previous", "Previous Track"),
@@ -56,8 +84,21 @@ public static class ActionCatalog
         return modes.Length > 0 ? modes[0].Mode : "";
     }
 
+    /// <summary>Kinds whose target is chosen with Scope (channel, Active Target, mix, ...).</summary>
+    public static bool IsScoped(string kind) => kind is Mute or Volume or Effect;
+
     /// <summary>Kinds that act on a Wave Link channel (fixed or Active Target).</summary>
-    public static bool IsChannelKind(string kind) => kind is Mute or Volume;
+    public static bool IsChannelKind(string kind) => IsScoped(kind);
+
+    /// <summary>Effective scope of an action, reading the pre-release UseActiveTarget flag too.</summary>
+    public static string ScopeOf(HotkeyAction action) =>
+        !string.IsNullOrEmpty(action.Scope) ? action.Scope!
+        : action.UseActiveTarget == true ? ScopeActive
+        : ScopeChannel;
+
+    /// <summary>Effective scope of a target list entry.</summary>
+    public static string ScopeOf(TargetEntry entry) =>
+        string.IsNullOrEmpty(entry.Scope) ? ScopeChannel : entry.Scope!;
 
     /// <summary>
     /// Effective (kind, mode) for an action, whether it uses a 2.6 type or a
@@ -78,14 +119,23 @@ public static class ActionCatalog
         _ => (action.Type, string.IsNullOrEmpty(action.Mode) ? DefaultMode(action.Type) : action.Mode!)
     };
 
-    /// <summary>Rewrite a legacy action type into kind + mode. Returns true if it changed.</summary>
+    /// <summary>Rewrite a legacy action into kind + mode + scope. Returns true if it changed.</summary>
     public static bool Upgrade(HotkeyAction? action)
     {
         if (action is null) return false;
         var (kind, mode) = Resolve(action);
-        bool changed = action.Type != kind || (ModesFor(kind).Length > 0 && action.Mode != mode);
+        string? newMode = ModesFor(kind).Length > 0 ? mode : null;
+        bool changed = action.Type != kind || action.Mode != newMode;
         action.Type = kind;
-        action.Mode = ModesFor(kind).Length > 0 ? mode : null;
+        action.Mode = newMode;
+
+        if (action.UseActiveTarget is not null)
+        {
+            if (action.UseActiveTarget == true && string.IsNullOrEmpty(action.Scope))
+                action.Scope = ScopeActive;
+            action.UseActiveTarget = null;
+            changed = true;
+        }
         return changed;
     }
 
@@ -105,12 +155,14 @@ public static class ActionCatalog
 
     /// <summary>
     /// Actions that make sense to fire repeatedly while a key is held (stepping
-    /// volume, skipping tracks, cycling targets). Toggles and absolute sets do
+    /// a level, skipping tracks, cycling targets). Toggles and absolute sets do
     /// not, so the editor only offers Repeat for these.
     /// </summary>
     public static bool IsRepeatable(string kind, string mode) => (kind, mode) switch
     {
         (Volume, "up" or "down") => true,
+        (Microphone, "gain_up" or "gain_down" or "mix_up" or "mix_down") => true,
+        (AppVolume, "up" or "down") => true,
         (Media, "volume_up" or "volume_down" or "next" or "previous") => true,
         (Target, "next" or "previous") => true,
         _ => false
@@ -119,4 +171,11 @@ public static class ActionCatalog
     public const int DefaultRepeatIntervalMs = 150;
     public const int MinRepeatIntervalMs = 30;
     public const int MaxRepeatIntervalMs = 2000;
+
+    /// <summary>
+    /// With Repeat on, the repeat interval also decides when a press becomes a
+    /// hold. If the key has a tap or double-tap action too, that is floored here
+    /// so a normal quick tap can't be mistaken for the start of a hold.
+    /// </summary>
+    public const int MinRepeatHoldThresholdMs = 250;
 }

@@ -10,7 +10,8 @@ namespace Wlhk.Core;
 ///  - double-press within DoublePressMs of the last UP fires doublePressAction
 ///    and cancels the pending hold,
 ///  - holdAction fires after its per-action duration (default 500 ms), and with
-///    Repeat set keeps firing every RepeatIntervalMs until the key is released,
+///    Repeat set fires after one RepeatIntervalMs and keeps firing every
+///    RepeatIntervalMs until the key is released,
 ///  - normalAction fires immediately on DOWN when it's the only trigger,
 ///    otherwise it is deferred to UP (and further deferred DoublePressMs when a
 ///    doublePressAction could still turn the press into a double),
@@ -40,6 +41,19 @@ public sealed class HotkeyEngine
         public Timer? RepeatTimer;
         public bool IsHeld;
         public string? TargetOverrideId;
+
+        /// <summary>When the last tap was released, opening a double-press window. 0 = no window.</summary>
+        public long DoubleWindowStart;
+
+        /// <summary>This press was the second half of a double; its release must not count as a tap.</summary>
+        public bool ConsumedByDouble;
+
+        /// <summary>
+        /// Bumped on every tap release. A deferred tap only runs if no later tap
+        /// came after it; a counter rather than a timestamp, because the system
+        /// tick (~15 ms) can make two releases look simultaneous.
+        /// </summary>
+        public long TapToken;
     }
 
     private readonly object _lock = new();
@@ -62,15 +76,15 @@ public sealed class HotkeyEngine
     }
 
     public HotkeyEngine(ConfigStore config, IWaveLinkControl wl, Action<string, string?, int?> showOsd,
-        TargetState targets, IMediaKeySender? media = null)
+        TargetState targets, IMediaKeySender? media = null, IAppAudio? appAudio = null)
     {
         _config = config;
         _targets = targets;
-        _executor = new HotkeyActionExecutor(() => _config.Snapshot, wl, showOsd, media, targets);
+        _executor = new HotkeyActionExecutor(() => _config.Snapshot, wl, showOsd, media, targets, appAudio);
         _bindings = EffectiveBindings.Build(config.Snapshot).Bindings;
     }
 
-    /// <summary>Replace the live bindings (recorded hotkeys + Global Features). Call on config change.</summary>
+    /// <summary>Replace the live bindings (recorded hotkeys + Volume Keys). Call on config change.</summary>
     public void SetBindings(IReadOnlyDictionary<string, HotkeyBinding> bindings) =>
         Volatile.Write(ref _bindings, bindings);
 
@@ -98,7 +112,7 @@ public sealed class HotkeyEngine
         var binding = GetBinding(key);
 
         // Keyboard auto-repeat. Ignored, except for bindings that ramp on it
-        // (Global Features volume keys), which re-fire their tap action so a held
+        // (the Volume Keys setting), which re-fire their tap action so a held
         // volume key behaves exactly like the native one.
         if (isRepeat || IsDown(state))
         {
@@ -110,25 +124,28 @@ public sealed class HotkeyEngine
         long now = Environment.TickCount64;
         state.DownTime = now;
         state.IsHeld = false;
+        state.ConsumedByDouble = false;
         state.TargetOverrideId = targetOverrideId;
 
         if (binding is null) return;
 
         var cfg = _config.Snapshot;
 
-        // Double press?
-        if (binding.DoublePressAction is not null && now - state.LastUpTime < cfg.DoublePressMs)
+        // Double press: this press landed inside the window the previous tap opened.
+        if (binding.DoublePressAction is not null && state.DoubleWindowStart != 0 &&
+            now - state.DoubleWindowStart < cfg.DoublePressMs)
         {
             CancelTimers(state);
+            state.DoubleWindowStart = 0;    // a third quick press starts over, not another double
+            state.ConsumedByDouble = true;  // and this press's release isn't a tap
             Execute(binding.DoublePressAction, key, state);
-            state.LastUpTime = 0; // prevent triple-press from firing double again
             return;
         }
 
         if (binding.HoldAction is not null)
         {
             var hold = binding.HoldAction;
-            int holdMs = hold.Duration ?? DefaultHoldMs;
+            int holdMs = HoldThreshold(binding, hold);
             CancelTimers(state);
             state.HoldTimer = new Timer(_ =>
             {
@@ -165,19 +182,35 @@ public sealed class HotkeyEngine
         var binding = GetBinding(key);
         if (binding is null) return;
 
+        // Second half of a double press: its action already ran on key-down. Its
+        // release used to schedule the tap action as well, so a double press
+        // fired both the double and (300 ms later) the single action.
+        if (state.ConsumedByDouble)
+        {
+            state.ConsumedByDouble = false;
+            return;
+        }
+
+        // A tap opens a double-press window; a hold doesn't (holding then
+        // quickly pressing again isn't a double press).
+        state.DoubleWindowStart = state.IsHeld ? 0 : now;
+        long token = ++state.TapToken;
+
         if (!state.IsHeld && binding.NormalAction is not null &&
             (binding.DoublePressAction is not null || binding.HoldAction is not null))
         {
             if (binding.DoublePressAction is not null)
             {
-                // Wait out the double-press window; if a double fires it resets LastUpTime to 0.
+                // Wait out the double-press window. A second press inside it
+                // closes the window (DoubleWindowStart = 0), cancelling this tap;
+                // a later tap bumps the token, superseding it.
                 int wait = _config.Snapshot.DoublePressMs;
                 var normal = binding.NormalAction;
                 _ = new Timer(_ =>
                 {
                     lock (_lock)
                     {
-                        if (_states.TryGetValue(key, out var s) && s.LastUpTime == now)
+                        if (_states.TryGetValue(key, out var s) && s.TapToken == token && s.DoubleWindowStart != 0)
                             Execute(normal, key, s);
                     }
                 }, null, wait, Timeout.Infinite);
@@ -187,6 +220,23 @@ public sealed class HotkeyEngine
                 Execute(binding.NormalAction, key, state);
             }
         }
+    }
+
+    /// <summary>
+    /// When a press turns into a hold. With Repeat on, the repeat interval sets it
+    /// (the editor disables Hold Time), so one number controls the whole ramp.
+    /// If the key also has a tap or double-tap action, it's floored so an ordinary
+    /// quick tap can't be mistaken for the start of a hold.
+    /// </summary>
+    private static int HoldThreshold(HotkeyBinding binding, HotkeyAction hold)
+    {
+        if (hold.Repeat != true)
+            return hold.Duration ?? DefaultHoldMs;
+
+        int interval = Math.Clamp(hold.RepeatIntervalMs ?? ActionCatalog.DefaultRepeatIntervalMs,
+            ActionCatalog.MinRepeatIntervalMs, ActionCatalog.MaxRepeatIntervalMs);
+        bool hasTap = binding.NormalAction is not null || binding.DoublePressAction is not null;
+        return hasTap ? Math.Max(interval, ActionCatalog.MinRepeatHoldThresholdMs) : interval;
     }
 
     private void StartRepeat(string key, KeyState state, HotkeyAction hold)

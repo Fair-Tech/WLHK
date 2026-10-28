@@ -25,6 +25,11 @@ internal sealed class FakeWaveLink : IWaveLinkControl
     public List<Mix> Mixes { get; } = [];
     public List<(string Id, double? Level, bool? Muted)> ChannelWrites { get; } = [];
     public List<(string ChannelId, string MixId, double? Level, bool? Muted)> PairWrites { get; } = [];
+    public List<OutputDevice> Outputs { get; } = [];
+    public List<InputDevice> Inputs { get; } = [];
+    public FocusedApp? Focused { get; set; }
+    /// <summary>Every 2.6 write, as "method arg=value ..." for easy assertions.</summary>
+    public List<string> Writes { get; } = [];
 
     public FakeWaveLink WithChannel(string id, string name, double level = 0.5, bool muted = false,
         params ChannelMix[] mixes)
@@ -35,8 +40,50 @@ internal sealed class FakeWaveLink : IWaveLinkControl
 
     public Channel? GetChannelById(string? id) => Channels.FirstOrDefault(c => c.Id == id);
     public Mix? GetMixById(string? id) => Mixes.FirstOrDefault(m => m.Id == id);
-    public OutputDevice? GetOutputDeviceById(string? id) => null;
-    public InputDevice? GetInputDeviceById(string? id) => null;
+    public OutputDevice? GetOutputDeviceById(string? id) => Outputs.FirstOrDefault(d => d.Id == id);
+    public InputDevice? GetInputDeviceById(string? id) => Inputs.FirstOrDefault(d => d.Id == id);
+    public IReadOnlyList<Channel> GetChannels() => Channels;
+    public IReadOnlyList<InputDevice> GetInputDevices() => Inputs;
+    public FocusedApp? FocusedApp => Focused;
+
+    public void SetMix(string mixId, double? level = null, bool? isMuted = null)
+    {
+        Writes.Add($"setMix {mixId} level={level} muted={isMuted}");
+        var mix = GetMixById(mixId);
+        if (mix is null) return;
+        if (level is double l) mix.Level = l;
+        if (isMuted is bool m) mix.IsMuted = m;
+    }
+
+    public void SetOutput(string deviceId, string outputId, double? level = null, bool? isMuted = null)
+    {
+        Writes.Add($"setOutput {deviceId}/{outputId} level={level} muted={isMuted}");
+        var port = GetOutputDeviceById(deviceId)?.Outputs.FirstOrDefault(o => o.Id == outputId);
+        if (port is null) return;
+        if (level is double l) port.Level = l;
+        if (isMuted is bool m) port.IsMuted = m;
+    }
+
+    public void SetInput(string deviceId, string inputId, bool? isMuted = null, double? gain = null,
+        double? micPcMix = null, bool? gainLock = null)
+    {
+        Writes.Add($"setInput {deviceId}/{inputId} muted={isMuted} gain={gain} mix={micPcMix} lock={gainLock}");
+        var port = GetInputDeviceById(deviceId)?.Inputs.FirstOrDefault(i => i.Id == inputId);
+        if (port is null) return;
+        if (isMuted is bool m) port.IsMuted = m;
+        if (gain is double g) port.Gain = g;
+        if (micPcMix is double x) port.MicPcMix = x;
+        if (gainLock is bool k) port.IsGainLockOn = k;
+    }
+
+    public void SetChannelEffect(string channelId, string effectId, bool isEnabled)
+    {
+        Writes.Add($"setEffect {channelId}/{effectId} on={isEnabled}");
+        var fx = GetChannelById(channelId)?.Effects.FirstOrDefault(e => e.Id == effectId);
+        if (fx is not null) fx.IsEnabled = isEnabled;
+    }
+
+    public void AddToChannel(string appId, string channelId) => Writes.Add($"addToChannel {appId} -> {channelId}");
 
     public void SetChannel(string id, double? level = null, bool? isMuted = null)
     {
@@ -62,6 +109,18 @@ internal sealed class FakeWaveLink : IWaveLinkControl
     public int ChannelWriteCount
     {
         get { lock (ChannelWrites) return ChannelWrites.Count; }
+    }
+}
+
+/// <summary>App volume double: records requests and answers with a canned result.</summary>
+internal sealed class FakeAppAudio(AppVolumeResult reply) : IAppAudio
+{
+    public List<(string Mode, int Step, int Value)> Requests { get; } = [];
+
+    public void ApplyToFocusedApp(string mode, int step, int value, Action<AppVolumeResult> done)
+    {
+        Requests.Add((mode, step, value));
+        done(reply);
     }
 }
 

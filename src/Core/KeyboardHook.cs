@@ -71,7 +71,7 @@ public sealed class KeyboardHook : IDisposable
     private HashSet<string> _suppressSet = new();
     private volatile bool _suppressionEnabled = true;
 
-    /// <summary>Target-modifier and Global Features data, published as one unit.</summary>
+    /// <summary>Target-modifier and Volume Keys data, published as one unit.</summary>
     private sealed record ResolutionInfo(
         IReadOnlySet<string> Dynamic,
         IReadOnlySet<string> GlobalOnly,
@@ -122,12 +122,12 @@ public sealed class KeyboardHook : IDisposable
 
     public void SetEnabled(bool enabled) => _suppressionEnabled = enabled;
 
-    /// <summary>Publish target modifiers and Global Features combos. Call on any config change.</summary>
+    /// <summary>Publish target modifiers and Volume Keys combos. Call on any config change.</summary>
     public void SetResolutionInfo(EffectiveBindings bindings) =>
         Volatile.Write(ref _info, new ResolutionInfo(bindings.Dynamic, bindings.GlobalOnly, bindings.TargetModifiers));
 
     /// <summary>
-    /// Global Features only take over native keys while Wave Link is connected.
+    /// The Volume Keys setting only takes over the keys while Wave Link is connected.
     /// Otherwise the volume keys would do nothing at all, so they go back to Windows.
     /// </summary>
     public void SetGlobalFeaturesActive(bool active) => _globalFeaturesActive = active;
@@ -252,7 +252,7 @@ public sealed class KeyboardHook : IDisposable
 
         bool mapped = Volatile.Read(ref _suppressSet).Contains(combo);
 
-        // A key mapped only by Global Features goes back to Windows, untouched and
+        // A key mapped only by the Volume Keys setting goes back to Windows, untouched and
         // undispatched, while Wave Link is disconnected.
         if (mapped && !_globalFeaturesActive && Volatile.Read(ref _info).GlobalOnly.Contains(combo))
             return CallNextHookEx(_hook, nCode, wParam, lParam);

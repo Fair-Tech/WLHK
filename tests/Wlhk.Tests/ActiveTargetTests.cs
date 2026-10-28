@@ -67,7 +67,7 @@ public sealed class ActiveTargetTests
             .WithChannel("mic", "Mic", level: 0.5, mixes: new Wlhk.WaveLink.ChannelMix { Id = "stream", Level = 0.5 });
         var state = Of(Entry("a", "browser"), Entry("b", "mic", mixId: "stream"));
         var exec = Executor(wl, state);
-        var volumeUp = new HotkeyAction { Type = "volume", Mode = "up", UseActiveTarget = true, Step = 10 };
+        var volumeUp = new HotkeyAction { Type = "volume", Mode = "up", Scope = "active", Step = 10 };
 
         exec.Execute(volumeUp);
         Assert.Equal("browser", Assert.Single(wl.ChannelWrites).Id);
@@ -84,7 +84,7 @@ public sealed class ActiveTargetTests
         var wl = new FakeWaveLink().WithChannel("browser", "Browser").WithChannel("mic", "Mic");
         var state = Of(Entry("a", "browser"), Entry("b", "mic", modifier: "shift"));
         var exec = Executor(wl, state);
-        var mute = new HotkeyAction { Type = "mute", Mode = "toggle", UseActiveTarget = true };
+        var mute = new HotkeyAction { Type = "mute", Mode = "toggle", Scope = "active" };
 
         exec.Execute(mute, new ActionContext("F13", TargetOverrideId: "b"));
         exec.Execute(mute, new ActionContext("F13", TargetOverrideId: null));
@@ -100,7 +100,7 @@ public sealed class ActiveTargetTests
         var exec = new HotkeyActionExecutor(() => new AppConfig(), new FakeWaveLink(),
             (a, b, c) => osd.Add((a, b, c)), new RecordingMediaSender(), new TargetState());
 
-        exec.Execute(new HotkeyAction { Type = "mute", Mode = "toggle", UseActiveTarget = true });
+        exec.Execute(new HotkeyAction { Type = "mute", Mode = "toggle", Scope = "active" });
 
         Assert.Equal("No Active Target", Assert.Single(osd).Item1);
     }
@@ -140,7 +140,7 @@ public sealed class ActiveTargetTests
         var config = new AppConfig();
         Assert.Empty(EffectiveBindings.Build(config).Bindings);
 
-        config.GlobalFeatures.VolumeKeys = "wavelink";
+        config.VolumeKeys = "wavelink";
         var effective = EffectiveBindings.Build(config);
 
         Assert.Equal(["VOLUME_DOWN", "VOLUME_MUTE", "VOLUME_UP"], effective.Mapped.Order().ToArray());
@@ -148,14 +148,14 @@ public sealed class ActiveTargetTests
         Assert.True(effective.Bindings["VOLUME_UP"].AutoRepeat);
         Assert.False(effective.Bindings["VOLUME_MUTE"].AutoRepeat);
         Assert.Equal(("volume", "up"), ActionCatalog.Resolve(effective.Bindings["VOLUME_UP"].NormalAction!));
-        Assert.True(effective.Bindings["VOLUME_UP"].NormalAction!.UseActiveTarget);
+        Assert.Equal("active", effective.Bindings["VOLUME_UP"].NormalAction!.Scope);
     }
 
     [Fact]
     public void RecordedHotkeyKeepsItsTapAndOnlyEmptyTriggersAreFilled()
     {
         var config = new AppConfig();
-        config.GlobalFeatures.VolumeKeys = "wavelink";
+        config.VolumeKeys = "wavelink";
         var recordedTap = new HotkeyAction { Type = "mute", Mode = "toggle", ChannelId = "mic" };
         var recordedHold = new HotkeyAction { Type = "cycle_output", DeviceIds = ["a", "b"] };
         config.Hotkeys["VOLUME_UP"] = new HotkeyBinding { NormalAction = recordedTap };
@@ -173,17 +173,17 @@ public sealed class ActiveTargetTests
     }
 
     [Fact]
-    public void TrackAndPlayPauseKeys()
+    public void OnlyTheVolumeKeysAreTakenOver()
     {
-        var config = new AppConfig();
-        config.GlobalFeatures.TrackKeys = "target";
-        config.GlobalFeatures.PlayPauseKey = "mute";
+        // Track and Play/Pause keys stay with Windows: there's no per-channel
+        // media control in Wave Link for them to drive.
+        var config = new AppConfig { VolumeKeys = "wavelink" };
 
-        var b = EffectiveBindings.Build(config).Bindings;
+        var mapped = EffectiveBindings.Build(config).Mapped;
 
-        Assert.Equal(("target", "next"), ActionCatalog.Resolve(b["MEDIA_NEXT_TRACK"].NormalAction!));
-        Assert.Equal(("target", "previous"), ActionCatalog.Resolve(b["MEDIA_PREV_TRACK"].NormalAction!));
-        Assert.Equal(("mute", "toggle"), ActionCatalog.Resolve(b["MEDIA_PLAY_PAUSE"].NormalAction!));
+        Assert.DoesNotContain("MEDIA_NEXT_TRACK", mapped);
+        Assert.DoesNotContain("MEDIA_PREV_TRACK", mapped);
+        Assert.DoesNotContain("MEDIA_PLAY_PAUSE", mapped);
     }
 
     [Fact]
@@ -192,7 +192,7 @@ public sealed class ActiveTargetTests
         var config = new AppConfig();
         config.Hotkeys["F13"] = new HotkeyBinding
         {
-            HoldAction = new HotkeyAction { Type = "volume", Mode = "up", UseActiveTarget = true }
+            HoldAction = new HotkeyAction { Type = "volume", Mode = "up", Scope = "active" }
         };
         config.Hotkeys["F14"] = new HotkeyBinding
         {
@@ -258,7 +258,7 @@ public sealed class ActiveTargetTests
         config = new AppConfig();
         config.Hotkeys[combo] = new HotkeyBinding
         {
-            NormalAction = new HotkeyAction { Type = "volume", Mode = "up", UseActiveTarget = true }
+            NormalAction = new HotkeyAction { Type = "volume", Mode = "up", Scope = "active" }
         };
         config.Targets.Add(Entry("a", "browser"));
         config.Targets.Add(Entry("b", "mic", modifier: "shift"));

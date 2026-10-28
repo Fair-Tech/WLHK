@@ -13,6 +13,30 @@ public sealed class Channel
     public bool IsMuted;
     public double Level = 1.0; // 0..1, protocol-native
     public List<ChannelMix> Mixes = new();
+    public List<ChannelEffect> Effects = new();
+    /// <summary>Apps Wave Link has routed to this channel.</summary>
+    public List<ChannelApp> Apps = new();
+}
+
+public sealed class ChannelEffect
+{
+    public string Id = "";
+    public string Name = "";
+    public bool IsEnabled;
+}
+
+public sealed class ChannelApp
+{
+    public string Id = "";
+    public string Name = "";
+}
+
+/// <summary>The app Wave Link reports as focused, and the channel it's routed to.</summary>
+public sealed class FocusedApp
+{
+    public string Id = "";
+    public string Name = "";
+    public string? ChannelId;
 }
 
 public sealed class ChannelMix
@@ -36,12 +60,34 @@ public sealed class OutputDevice
 {
     public string Id = "";
     public string Name = "";
+    public List<OutputPort> Outputs = new();
+}
+
+/// <summary>A physical output on a device (e.g. the Wave's headphone jack), with its own level.</summary>
+public sealed class OutputPort
+{
+    public string Id = "";
+    public string Name = "";
+    public double Level = 1.0;
+    public bool IsMuted;
 }
 
 public sealed class InputPort
 {
     public string Id = "";
+    public string Name = "";
     public bool IsMuted;
+
+    /// <summary>Gain as Wave Link's normalized 0..1 value; see GainToDb.</summary>
+    public double? Gain;
+    public double GainMinDb;
+    public double GainMaxDb;
+    /// <summary>Normalized value -> dB pairs from Wave Link, ascending.</summary>
+    public List<(double Value, double Db)> GainTable = new();
+
+    /// <summary>Wave mic monitor balance between mic and PC audio, 0..1. Null if unsupported.</summary>
+    public double? MicPcMix;
+    public bool? IsGainLockOn;
 }
 
 public sealed class InputDevice
@@ -81,6 +127,7 @@ public sealed class WaveLinkClient : IDisposable, IWaveLinkControl
     private volatile List<OutputDevice> _outputDevices = new();
     private volatile List<InputDevice> _inputDevices = new();
     private volatile string _mainOutputId = "";
+    private volatile FocusedApp? _focusedApp;
 
     private readonly object _stateLock = new();
     private readonly Dictionary<ChannelPropertyKey, PropertyProtection> _propertyProtections = new();
@@ -189,6 +236,8 @@ public sealed class WaveLinkClient : IDisposable, IWaveLinkControl
     public IReadOnlyList<Mix> GetMixes() => _mixes;
     public IReadOnlyList<OutputDevice> GetOutputDevices() => _outputDevices;
     public string MainOutputId => _mainOutputId;
+    public IReadOnlyList<InputDevice> GetInputDevices() => _inputDevices;
+    public FocusedApp? FocusedApp => _focusedApp;
 
     public Channel? GetChannelById(string? id) =>
         id is null ? null : _channels.FirstOrDefault(c => c.Id == id);
@@ -310,6 +359,17 @@ public sealed class WaveLinkClient : IDisposable, IWaveLinkControl
                 _outputDevices = ParseOutputDevices(outputsNode?["outputDevices"]);
                 _mainOutputId = outputsNode?["mainOutput"]?["outputDeviceId"]?.GetValue<string>() ?? "";
                 _inputDevices = ParseInputDevices(inputsTask.Result?["inputDevices"]);
+
+                // Wave Link only reports the focused app to clients that ask. It
+                // answers with the current app straight away, then on every change.
+                try
+                {
+                    await SendRequestAsync("setSubscription", new JsonObject
+                    {
+                        ["focusedAppChanged"] = new JsonObject { ["isEnabled"] = true }
+                    }, 3000).ConfigureAwait(false);
+                }
+                catch { /* older Wave Link: focused-app features just stay unavailable */ }
 
                 IsConnected = true;
                 Ready?.Invoke();
@@ -584,9 +644,10 @@ public sealed class WaveLinkClient : IDisposable, IWaveLinkControl
             case "outputDeviceChanged":
             {
                 var target = GetOutputDeviceById(p["id"]?.GetValue<string>());
-                if (target is not null && p["name"] is JsonNode n)
+                if (target is not null)
                 {
-                    target.Name = n.GetValue<string>();
+                    lock (_stateLock)
+                        WaveLinkProtocol.ApplyOutputDevicePatch(target, p);
                     StateChanged?.Invoke();
                 }
                 break;
@@ -602,16 +663,21 @@ public sealed class WaveLinkClient : IDisposable, IWaveLinkControl
                 var target = GetInputDeviceById(p["id"]?.GetValue<string>());
                 if (target is not null && p["inputs"] is JsonArray inputs)
                 {
-                    foreach (var inputPatch in inputs)
-                    {
-                        var port = target.Inputs.FirstOrDefault(i => i.Id == inputPatch?["id"]?.GetValue<string>());
-                        if (port is not null && inputPatch?["isMuted"] is JsonNode m)
-                            port.IsMuted = m.GetValue<bool>();
-                    }
+                    lock (_stateLock)
+                        foreach (var inputPatch in inputs)
+                        {
+                            var port = target.Inputs.FirstOrDefault(i => i.Id == inputPatch?["id"]?.GetValue<string>());
+                            if (port is not null && inputPatch is not null)
+                                WaveLinkProtocol.ApplyInputPatch(port, inputPatch);
+                        }
                     StateChanged?.Invoke();
                 }
                 break;
             }
+
+            case "focusedAppChanged":
+                _focusedApp = WaveLinkProtocol.ParseFocusedApp(p);
+                break;
         }
     }
 
@@ -725,7 +791,9 @@ public sealed class WaveLinkClient : IDisposable, IWaveLinkControl
         Name = source.Name,
         IsMuted = source.IsMuted,
         Level = source.Level,
-        Mixes = source.Mixes.Select(CloneChannelMix).ToList()
+        Mixes = source.Mixes.Select(CloneChannelMix).ToList(),
+        Effects = source.Effects.Select(e => new ChannelEffect { Id = e.Id, Name = e.Name, IsEnabled = e.IsEnabled }).ToList(),
+        Apps = source.Apps.Select(a => new ChannelApp { Id = a.Id, Name = a.Name }).ToList()
     };
 
     private static ChannelMix CloneChannelMix(ChannelMix source) => new()
@@ -920,44 +988,9 @@ public sealed class WaveLinkClient : IDisposable, IWaveLinkControl
 
     // ─── Parsers (tolerant of extra/missing fields) ─────────────────────────────
 
-    private static List<OutputDevice> ParseOutputDevices(JsonNode? arr)
-    {
-        var list = new List<OutputDevice>();
-        if (arr is JsonArray a)
-            foreach (var n in a)
-                if (n is not null)
-                    list.Add(new OutputDevice
-                    {
-                        Id = n["id"]?.GetValue<string>() ?? "",
-                        Name = n["name"]?.GetValue<string>() ?? ""
-                    });
-        return list;
-    }
+    private static List<OutputDevice> ParseOutputDevices(JsonNode? arr) => WaveLinkProtocol.ParseOutputDevices(arr);
 
-    private static List<InputDevice> ParseInputDevices(JsonNode? arr)
-    {
-        var list = new List<InputDevice>();
-        if (arr is JsonArray a)
-            foreach (var n in a)
-            {
-                if (n is null) continue;
-                var dev = new InputDevice
-                {
-                    Id = n["id"]?.GetValue<string>() ?? "",
-                    Name = n["name"]?.GetValue<string>() ?? ""
-                };
-                if (n["inputs"] is JsonArray inputs)
-                    foreach (var i in inputs)
-                        if (i is not null)
-                            dev.Inputs.Add(new InputPort
-                            {
-                                Id = i["id"]?.GetValue<string>() ?? "",
-                                IsMuted = i["isMuted"]?.GetValue<bool>() ?? false
-                            });
-                list.Add(dev);
-            }
-        return list;
-    }
+    private static List<InputDevice> ParseInputDevices(JsonNode? arr) => WaveLinkProtocol.ParseInputDevices(arr);
 
     // ─── Mutations (protocol shapes match v1 SDK exactly) ──────────────────────
 
@@ -1041,15 +1074,113 @@ public sealed class WaveLinkClient : IDisposable, IWaveLinkControl
         _mainOutputId = outputDeviceId;
     }
 
-    public void SetInputMute(string deviceId, string inputId, bool isMuted)
+    public void SetInputMute(string deviceId, string inputId, bool isMuted) =>
+        SetInput(deviceId, inputId, isMuted: isMuted);
+
+    // The setters below were each verified against Wave Link 3.2 by writing back
+    // the current value (accepted, nothing changed) and, for gain lock, by a real
+    // change read back and restored. They update local state optimistically so
+    // repeated steps build on the value just sent, then queue the send in order.
+
+    /// <summary>Mic input: hardware mute, gain (normalized 0..1), Mic/PC mix (0..1), gain lock.</summary>
+    public void SetInput(string deviceId, string inputId, bool? isMuted = null, double? gain = null,
+        double? micPcMix = null, bool? gainLock = null)
     {
-        SendNotifySafe("setInputDevice", new JsonObject
+        var input = new JsonObject { ["id"] = inputId };
+        if (isMuted is bool m) input["isMuted"] = m;
+        if (gain is double g) input["gain"] = new JsonObject { ["value"] = g };
+        if (micPcMix is double x) input["micPcMix"] = new JsonObject { ["value"] = x };
+        if (gainLock is bool l) input["isGainLockOn"] = l;
+
+        lock (_stateLock)
         {
-            ["id"] = deviceId,
-            ["inputs"] = new JsonArray(new JsonObject { ["id"] = inputId, ["isMuted"] = isMuted })
-        });
-        var port = GetInputDeviceById(deviceId)?.Inputs.FirstOrDefault(i => i.Id == inputId);
-        if (port is not null) port.IsMuted = isMuted;
+            var port = GetInputDeviceById(deviceId)?.Inputs.FirstOrDefault(i => i.Id == inputId);
+            if (port is not null)
+            {
+                if (isMuted is bool m2) port.IsMuted = m2;
+                if (gain is double g2) port.Gain = g2;
+                if (micPcMix is double x2) port.MicPcMix = x2;
+                if (gainLock is bool l2) port.IsGainLockOn = l2;
+            }
+            SendNotifySafe("setInputDevice", new JsonObject
+            {
+                ["id"] = deviceId,
+                ["inputs"] = new JsonArray(input)
+            });
+        }
+    }
+
+    /// <summary>Master level / mute of a whole mix.</summary>
+    public void SetMix(string mixId, double? level = null, bool? isMuted = null)
+    {
+        var p = new JsonObject { ["id"] = mixId };
+        if (level is double l) p["level"] = l;
+        if (isMuted is bool m) p["isMuted"] = m;
+
+        lock (_stateLock)
+        {
+            PublishMixCopyLocked(mixes =>
+            {
+                var mix = mixes.FirstOrDefault(candidate => candidate.Id == mixId);
+                if (mix is null) return false;
+                if (level is double l2) mix.Level = l2;
+                if (isMuted is bool m2) mix.IsMuted = m2;
+                return true;
+            });
+            SendNotifySafe("setMix", p);
+        }
+    }
+
+    /// <summary>Level / mute of a physical output (e.g. the headphone jack).</summary>
+    public void SetOutput(string deviceId, string outputId, double? level = null, bool? isMuted = null)
+    {
+        var output = new JsonObject { ["id"] = outputId };
+        if (level is double l) output["level"] = l;
+        if (isMuted is bool m) output["isMuted"] = m;
+
+        lock (_stateLock)
+        {
+            var port = GetOutputDeviceById(deviceId)?.Outputs.FirstOrDefault(o => o.Id == outputId);
+            if (port is not null)
+            {
+                if (level is double l2) port.Level = l2;
+                if (isMuted is bool m2) port.IsMuted = m2;
+            }
+            SendNotifySafe("setOutputDevice", new JsonObject
+            {
+                ["id"] = deviceId,
+                ["outputs"] = new JsonArray(output)
+            });
+        }
+    }
+
+    /// <summary>Turn one of a channel's effects (noise gate, EQ, ...) on or off.</summary>
+    public void SetChannelEffect(string channelId, string effectId, bool isEnabled)
+    {
+        lock (_stateLock)
+        {
+            PublishChannelCopyLocked(channels =>
+            {
+                var effect = channels.FirstOrDefault(c => c.Id == channelId)?.Effects.FirstOrDefault(e => e.Id == effectId);
+                if (effect is null) return false;
+                effect.IsEnabled = isEnabled;
+                return true;
+            });
+            SendNotifySafe("setChannel", new JsonObject
+            {
+                ["id"] = channelId,
+                ["effects"] = new JsonArray(new JsonObject { ["id"] = effectId, ["isEnabled"] = isEnabled })
+            });
+        }
+    }
+
+    /// <summary>Route an app (by Wave Link's app id) to a channel.</summary>
+    public void AddToChannel(string appId, string channelId)
+    {
+        SendNotifySafe("addToChannel", new JsonObject { ["appId"] = appId, ["channelId"] = channelId });
+        var focused = _focusedApp;
+        if (focused is not null && focused.Id == appId)
+            _focusedApp = new FocusedApp { Id = focused.Id, Name = focused.Name, ChannelId = channelId };
     }
 
     public void Dispose()

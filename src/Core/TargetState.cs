@@ -9,8 +9,9 @@ namespace Wlhk.Core;
 ///   2. a target picked by a held modifier for this particular key press
 ///   3. the active entry, changed by Next / Previous / Select
 ///
-/// The active selection is runtime state and starts at the first entry on each
-/// launch, so a volume knob always begins on a predictable target after a reboot.
+/// The active selection starts at the first entry on each launch, so a volume
+/// knob begins on a predictable target, unless Persistent Target is on, in which
+/// case the app restores it (see ActiveId and Select).
 /// Thread-safe: read from the hook/engine threads, written from the UI thread.
 /// </summary>
 public sealed class TargetState
@@ -28,6 +29,15 @@ public sealed class TargetState
     public IReadOnlyList<TargetEntry> Entries
     {
         get { lock (_gate) return _entries.ToList(); }
+    }
+
+    /// <summary>
+    /// The chosen entry, ignoring momentary and modifier overrides. This is what
+    /// Persistent Target saves: a key held at the moment of saving shouldn't stick.
+    /// </summary>
+    public string? ActiveId
+    {
+        get { lock (_gate) return _activeId; }
     }
 
     /// <summary>Replace the list (config change), keeping the active entry if it still exists.</summary>
@@ -118,6 +128,9 @@ public sealed class TargetState
 
     private TargetEntry? Find(string? id) => id is null ? null : _entries.FirstOrDefault(e => e.Id == id);
 
-    private static TargetEntry Clone(TargetEntry e) =>
-        new() { Id = e.Id, ChannelId = e.ChannelId, MixId = e.MixId, Modifier = e.Modifier };
+    private static TargetEntry Clone(TargetEntry e) => new()
+    {
+        Id = e.Id, Scope = e.Scope, ChannelId = e.ChannelId, MixId = e.MixId,
+        DeviceId = e.DeviceId, Modifier = e.Modifier
+    };
 }

@@ -82,7 +82,7 @@ public sealed class EngineAndInputTests
     {
         var wl = new FakeWaveLink().WithChannel("music", "Music", level: 0.50);
         var config = new AppConfig();
-        config.GlobalFeatures.VolumeKeys = "wavelink";
+        config.VolumeKeys = "wavelink";
         config.Targets.Add(Entry("a", "music"));
         var engine = Engine(wl, Of(Entry("a", "music")), config);
 
@@ -137,7 +137,7 @@ public sealed class EngineAndInputTests
         var state = Of(Entry("a", "browser"), Entry("b", "mic", modifier: "shift"));
         var engine = EngineWith(wl, out _, new HotkeyBinding
         {
-            NormalAction = new HotkeyAction { Type = "mute", Mode = "toggle", UseActiveTarget = true }
+            NormalAction = new HotkeyAction { Type = "mute", Mode = "toggle", Scope = "active" }
         }, state);
 
         engine.OnKey(new KeyInput("F13", true, false, "b"));

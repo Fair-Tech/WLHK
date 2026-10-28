@@ -88,8 +88,40 @@ public sealed class ConsolidatedActionTests
 
         string json = JsonSerializer.Serialize(config, ConfigJsonContext.Default.AppConfig);
 
-        foreach (string field in new[] { "useActiveTarget", "targetId", "\"osd\"", "repeat", "autoRepeat" })
+        foreach (string field in new[] { "useActiveTarget", "\"scope\"", "effectId", "effectName", "targetId", "\"osd\"", "repeat", "autoRepeat", "globalFeatures", "activeTargetId" })
             Assert.DoesNotContain(field, json);
+    }
+
+    [Fact]
+    public void PreReleaseActiveTargetFlagUpgradesToScope()
+    {
+        var action = new HotkeyAction { Type = "volume", Mode = "up", UseActiveTarget = true };
+
+        Assert.True(ActionCatalog.Upgrade(action));
+        Assert.Equal("active", action.Scope);
+        Assert.Null(action.UseActiveTarget);
+    }
+
+    [Fact]
+    public void PreReleaseGlobalFeaturesVolumeKeysCarryOver()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "WLHK.Tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            string path = Path.Combine(dir, "config.json");
+            File.WriteAllText(path, """{"globalFeatures":{"volumeKeys":"wavelink","trackKeys":"target"}}""");
+
+            var store = new ConfigStore(path);
+            store.Load();
+
+            Assert.Equal("wavelink", store.Current.VolumeKeys);
+            Assert.Null(store.Current.LegacyGlobalFeatures);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
     }
 
     // ─── Mute modes ─────────────────────────────────────────────────────────────

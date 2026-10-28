@@ -27,8 +27,20 @@ public sealed class HotkeyAction
     /// </summary>
     public string? Mode { get; set; }
 
-    /// <summary>v2.6: aim at the Active Target instead of ChannelId/MixId.</summary>
+    /// <summary>
+    /// v2.6: what a Mute / Volume / Effect action aims at. Null or "channel" uses
+    /// ChannelId (+ optional MixId); "active" the Active Target; "focused_app" the
+    /// Wave Link channel of the focused app; "mix" a whole mix (MixId); "output"
+    /// an output device (DeviceId).
+    /// </summary>
+    public string? Scope { get; set; }
+
+    /// <summary>Pre-release 2.6 form of Scope = "active". Read only, upgraded on load.</summary>
     public bool? UseActiveTarget { get; set; }
+
+    /// <summary>v2.6: channel effect for Effect actions, matched by id then by name.</summary>
+    public string? EffectId { get; set; }
+    public string? EffectName { get; set; }
 
     /// <summary>v2.6: target entry for "select" and "hold" target actions.</summary>
     public string? TargetId { get; set; }
@@ -54,33 +66,30 @@ public sealed class HotkeyBinding
 
     /// <summary>
     /// Runtime only: re-fire the normal action on the OS key-repeat stream. Set on
-    /// bindings synthesised by Global Features so a held volume key ramps the way
+    /// bindings synthesised by the Volume Keys setting so a held volume key ramps the way
     /// it does natively. Never persisted.
     /// </summary>
     [JsonIgnore]
     public bool AutoRepeat { get; set; }
 }
 
-/// <summary>v2.6: take over native keys without recording hotkeys for them.</summary>
-public sealed class GlobalFeatures
+/// <summary>Pre-release 2.6 settings block. Read only so a tested build's choice carries over.</summary>
+public sealed class LegacyGlobalFeatures
 {
-    /// <summary>"windows" (default) or "wavelink": Vol+/Vol-/Mute drive the Active Target.</summary>
-    public string VolumeKeys { get; set; } = "windows";
-
-    /// <summary>"windows" (default) or "target": Next/Previous track switch the Active Target.</summary>
-    public string TrackKeys { get; set; } = "windows";
-
-    /// <summary>"windows" (default) or "mute": Play/Pause toggles mute on the Active Target.</summary>
-    public string PlayPauseKey { get; set; } = "windows";
+    public string? VolumeKeys { get; set; }
 }
 
 /// <summary>v2.6: one entry in the Active Target list.</summary>
 public sealed class TargetEntry
 {
     public string Id { get; set; } = "";
+    /// <summary>Null or "channel", "mix", "output" or "focused_app"; same meaning as HotkeyAction.Scope.</summary>
+    public string? Scope { get; set; }
     public string? ChannelId { get; set; }
-    /// <summary>Null means All Mixes.</summary>
+    /// <summary>Channel scope: null means All Mixes. Mix scope: the mix itself.</summary>
     public string? MixId { get; set; }
+    /// <summary>Output scope: the output device.</summary>
+    public string? DeviceId { get; set; }
     /// <summary>Optional "ctrl"/"alt"/"shift"/"win": hold it to aim at this target.</summary>
     public string? Modifier { get; set; }
 }
@@ -106,8 +115,22 @@ public sealed class AppConfig
     /// </summary>
     public bool DistinguishModifierSides { get; set; }
 
-    public GlobalFeatures GlobalFeatures { get; set; } = new();
+    /// <summary>
+    /// v2.6: "windows" (default) leaves the keyboard volume keys alone; "wavelink"
+    /// makes Vol+ / Vol- / Mute control the Active Target.
+    /// </summary>
+    public string VolumeKeys { get; set; } = "windows";
+
     public List<TargetEntry> Targets { get; set; } = new();
+
+    /// <summary>v2.6: remember the active target across restarts.</summary>
+    public bool PersistentTarget { get; set; }
+
+    /// <summary>v2.6: active target saved when PersistentTarget is on.</summary>
+    public string? ActiveTargetId { get; set; }
+
+    [JsonPropertyName("globalFeatures")]
+    public LegacyGlobalFeatures? LegacyGlobalFeatures { get; set; }
 }
 
 [JsonSourceGenerationOptions(
@@ -220,7 +243,10 @@ public sealed class ConfigStore
         c.OsdDurationMs = Math.Clamp(c.OsdDurationMs, 250, 15000);
         c.DoublePressMs = Math.Clamp(c.DoublePressMs, 100, 1000);
         if (string.IsNullOrEmpty(c.OsdPosition)) c.OsdPosition = "bottom-right";
-        c.GlobalFeatures ??= new GlobalFeatures();
+        if (c.LegacyGlobalFeatures?.VolumeKeys is "wavelink")
+            c.VolumeKeys = "wavelink";
+        c.LegacyGlobalFeatures = null;
+        if (c.VolumeKeys is not ("windows" or "wavelink")) c.VolumeKeys = "windows";
         c.Targets ??= new();
         c.Targets.RemoveAll(t => t is null);
         foreach (var t in c.Targets)
