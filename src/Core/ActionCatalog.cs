@@ -20,6 +20,7 @@ public static class ActionCatalog
     public const string SwitchOutput = "switch_output";
     public const string CycleOutput = "cycle_output";
     public const string RouteApp = "route_app";
+    /// <summary>Pre-release 2.6 kind, now Volume / Mute with Scope = "app_volume". Upgraded on load.</summary>
     public const string AppVolume = "app_volume";
     public const string Media = "media";
     public const string Target = "target";
@@ -30,6 +31,13 @@ public static class ActionCatalog
     public const string ScopeFocusedApp = "focused_app";
     public const string ScopeMix = "mix";
     public const string ScopeOutput = "output";
+    /// <summary>The focused app's own volume, as in the Windows Volume Mixer.</summary>
+    public const string ScopeAppVolume = "app_volume";
+    /// <summary>The default Windows playback device ("Native Volume Controls").</summary>
+    public const string ScopeSystem = "system";
+
+    /// <summary>Scopes handled by Windows rather than Wave Link, so they work without it.</summary>
+    public static bool IsWindowsScope(string scope) => scope is ScopeAppVolume or ScopeSystem;
 
     /// <summary>Editor order and labels.</summary>
     public static readonly (string Kind, string Label)[] Kinds =
@@ -41,7 +49,6 @@ public static class ActionCatalog
         (SwitchOutput, "Switch Output Device"),
         (CycleOutput, "Cycle Output Devices"),
         (RouteApp, "Move Focused App"),
-        (AppVolume, "Focused App Volume"),
         (Media, "Media Key"),
         (Target, "Change Target"),
     };
@@ -59,11 +66,6 @@ public static class ActionCatalog
             ("lock_toggle", "Toggle Gain Lock")
         ],
         Effect => [("toggle", "Toggle"), ("enable", "Turn On"), ("disable", "Turn Off")],
-        AppVolume =>
-        [
-            ("up", "Up"), ("down", "Down"), ("set", "Set Level"),
-            ("toggle_mute", "Toggle Mute"), ("mute", "Mute"), ("unmute", "Unmute")
-        ],
         Media =>
         [
             ("play_pause", "Play / Pause"), ("next", "Next Track"), ("previous", "Previous Track"),
@@ -77,6 +79,17 @@ public static class ActionCatalog
         ],
         _ => []
     };
+
+    /// <summary>
+    /// Modes offered on a given trigger ("normal", "hold" or "double"). Target
+    /// While Held needs the key to still be down when it runs, which a Normal
+    /// Press with other triggers can't promise, so it's offered on Hold and
+    /// Double Press (double-tap, then hold) only.
+    /// </summary>
+    public static (string Mode, string Label)[] ModesFor(string kind, string trigger) =>
+        kind == Target && trigger == "normal"
+            ? ModesFor(kind).Where(m => m.Mode != "hold").ToArray()
+            : ModesFor(kind);
 
     public static string DefaultMode(string kind)
     {
@@ -93,6 +106,7 @@ public static class ActionCatalog
     /// <summary>Effective scope of an action, reading the pre-release UseActiveTarget flag too.</summary>
     public static string ScopeOf(HotkeyAction action) =>
         !string.IsNullOrEmpty(action.Scope) ? action.Scope!
+        : action.Type == AppVolume ? ScopeAppVolume
         : action.UseActiveTarget == true ? ScopeActive
         : ScopeChannel;
 
@@ -116,6 +130,13 @@ public static class ActionCatalog
         "media_stop" => (Media, "stop"),
         "media_volume_up" => (Media, "volume_up"),
         "media_volume_down" => (Media, "volume_down"),
+        AppVolume => action.Mode switch
+        {
+            "toggle_mute" => (Mute, "toggle"),
+            "mute" or "unmute" => (Mute, action.Mode!),
+            "down" or "set" => (Volume, action.Mode!),
+            _ => (Volume, "up")
+        },
         _ => (action.Type, string.IsNullOrEmpty(action.Mode) ? DefaultMode(action.Type) : action.Mode!)
     };
 
@@ -126,6 +147,8 @@ public static class ActionCatalog
         var (kind, mode) = Resolve(action);
         string? newMode = ModesFor(kind).Length > 0 ? mode : null;
         bool changed = action.Type != kind || action.Mode != newMode;
+        if (action.Type == AppVolume && string.IsNullOrEmpty(action.Scope))
+            action.Scope = ScopeAppVolume;
         action.Type = kind;
         action.Mode = newMode;
 
@@ -162,7 +185,6 @@ public static class ActionCatalog
     {
         (Volume, "up" or "down") => true,
         (Microphone, "gain_up" or "gain_down" or "mix_up" or "mix_down") => true,
-        (AppVolume, "up" or "down") => true,
         (Media, "volume_up" or "volume_down" or "next" or "previous") => true,
         (Target, "next" or "previous") => true,
         _ => false

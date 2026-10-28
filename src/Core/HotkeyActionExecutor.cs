@@ -10,6 +10,15 @@ namespace Wlhk.Core;
 /// </summary>
 public readonly record struct ActionContext(string? Key, string? TargetOverrideId);
 
+/// <summary>
+/// What the OSD shows: a title, then either text or a 0-100 bar. IconPath is an
+/// exe whose icon to draw beside the title. IconForApp asks for the foreground
+/// app's icon if that app is the one named; it's looked up on the UI thread so
+/// the keyboard hook never waits on it.
+/// </summary>
+public readonly record struct OsdMessage(string Title, string? Text, int? Slider,
+    string? IconPath = null, string? IconForApp = null);
+
 public sealed class HotkeyActionExecutor
 {
     private readonly Func<AppConfig> _getConfig;
@@ -18,6 +27,12 @@ public sealed class HotkeyActionExecutor
     private readonly IMediaKeySender _media;
     private readonly TargetState _targets;
     private readonly IAppAudio _appAudio;
+    private readonly Action<OsdMessage>? _richOsd;
+
+    // Speaker emoji that replace the word "Volume" on the OSD.
+    private const string SpeakerUp = "\U0001F50A";   // speaker, high volume
+    private const string SpeakerDown = "\U0001F509"; // speaker, medium volume
+    private const string SpeakerMuted = "\U0001F507"; // speaker, muted
 
     /// <summary>
     /// Last value sent per non-channel level (mix, output, gain, Mic/PC mix).
@@ -34,7 +49,8 @@ public sealed class HotkeyActionExecutor
         Action<string, string?, int?> showOsd,
         IMediaKeySender? media = null,
         TargetState? targets = null,
-        IAppAudio? appAudio = null)
+        IAppAudio? appAudio = null,
+        Action<OsdMessage>? richOsd = null)
     {
         _getConfig = getConfig;
         _wl = wl;
@@ -42,33 +58,30 @@ public sealed class HotkeyActionExecutor
         _media = media ?? new MediaKeySender();
         _targets = targets ?? new TargetState();
         _appAudio = appAudio ?? AppAudio.Default;
+        _richOsd = richOsd;
     }
 
     public void Execute(HotkeyAction? action, ActionContext context = default)
     {
         if (action is null) return;
         var (kind, mode) = Resolve(action);
-        var osd = new Osd(action.Osd != false, _showOsd);
+        var osd = new Osd(action.Osd != false, _showOsd, _richOsd);
 
-        // These don't need Wave Link: media keys and app volume go to Windows,
-        // and the target list is local state. Run them before the connection check.
         switch (kind)
         {
+            // Media keys go to Windows and the target list is local state.
             case Media: ExecuteMedia(mode, osd); return;
             case Target: ExecuteTarget(action, mode, context, osd); return;
-            case AppVolume: ExecuteAppVolume(action, mode, osd); return;
+            // Mute and Volume may aim at Windows rather than Wave Link, so they
+            // check the connection themselves once the target is known.
+            case ActionCatalog.Mute: ExecuteMute(action, mode, context, osd); return;
+            case ActionCatalog.Volume: ExecuteVolume(action, mode, context, osd); return;
         }
 
-        if (!_wl.IsConnected)
-        {
-            osd.Show("Wave Link Disconnected", "Failed", null);
-            return;
-        }
+        if (!RequireWaveLink(osd)) return;
 
         switch (kind)
         {
-            case ActionCatalog.Mute: ExecuteMute(action, mode, context, osd); break;
-            case ActionCatalog.Volume: ExecuteVolume(action, mode, context, osd); break;
             case Microphone: ExecuteMicrophone(action, mode, osd); break;
             case Effect: ExecuteEffect(action, mode, context, osd); break;
             case RouteApp: ExecuteRouteApp(action, osd); break;
@@ -77,19 +90,36 @@ public sealed class HotkeyActionExecutor
         }
     }
 
-    /// <summary>Gate for the per-action OSD toggle.</summary>
-    private readonly record struct Osd(bool Enabled, Action<string, string?, int?> Sink)
+    private bool RequireWaveLink(Osd osd)
     {
-        public void Show(string title, string? text, int? slider)
+        if (_wl.IsConnected) return true;
+        osd.Show("Wave Link Disconnected", "Failed", null);
+        return false;
+    }
+
+    /// <summary>Gate for the per-action OSD toggle; prefers the rich sink (icons) when there is one.</summary>
+    private readonly record struct Osd(bool Enabled, Action<string, string?, int?> Sink, Action<OsdMessage>? Rich)
+    {
+        public void Show(string title, string? text, int? slider, string? iconPath = null, string? iconForApp = null)
         {
-            if (Enabled) Sink(title, text, slider);
+            if (!Enabled) return;
+            if (Rich is not null) Rich(new OsdMessage(title, text, slider, iconPath, iconForApp));
+            else Sink(title, text, slider);
         }
     }
 
+    private static string MuteEmoji(bool muted) => muted ? SpeakerMuted : SpeakerUp;
+    private static string LevelEmoji(int before, int after) => after < before ? SpeakerDown : SpeakerUp;
+
     // ─── Targets ────────────────────────────────────────────────────────────────
 
-    /// <summary>A resolved target: always concrete, never "active" or "focused_app".</summary>
-    private readonly record struct Aim(string Scope, string? ChannelId, string? MixId, string? DeviceId);
+    /// <summary>
+    /// A resolved target: always concrete, never "active" or "focused_app".
+    /// FocusedApp is set when it was reached through the focused app's channel,
+    /// so the OSD can name the app and show its icon alongside the channel.
+    /// </summary>
+    private readonly record struct Aim(string Scope, string? ChannelId, string? MixId, string? DeviceId,
+        string? FocusedApp = null);
 
     /// <summary>
     /// What this action aims at right now. Follows the Active Target and the
@@ -118,12 +148,17 @@ public sealed class HotkeyActionExecutor
         if (scope == ScopeFocusedApp)
         {
             var app = _wl.FocusedApp;
-            if (app?.ChannelId is null)
-            {
-                osd.Show("Focused App", app is null ? "No focused app" : $"{app.Name} isn't in a channel", null);
-                return null;
-            }
-            return new Aim(ScopeChannel, app.ChannelId, null, null);
+            if (app?.ChannelId is not null)
+                return new Aim(ScopeChannel, app.ChannelId, null, null, app.Name);
+
+            // The app isn't routed to a channel: use the fallback, if one is set.
+            var fallback = _getConfig().FocusedAppFallback;
+            string fallbackScope = fallback is null ? "" : ScopeOf(fallback);
+            if (fallback is not null && fallbackScope is not (ScopeActive or ScopeFocusedApp))
+                return new Aim(fallbackScope, fallback.ChannelId, fallback.MixId, fallback.DeviceId);
+
+            osd.Show("Focused App", app is null ? "No focused app" : $"{app.Name} isn't in a channel", null);
+            return null;
         }
 
         return new Aim(scope, channelId, mixId, deviceId);
@@ -133,6 +168,8 @@ public sealed class HotkeyActionExecutor
     public string DescribeTarget(TargetEntry entry) => ScopeOf(entry) switch
     {
         ScopeFocusedApp => "Focused App's Channel",
+        ScopeAppVolume => "Focused App's Volume",
+        ScopeSystem => "Native Volume Controls",
         ScopeMix => $"Mix: {_wl.GetMixById(entry.MixId)?.Name ?? entry.MixId ?? "(none)"}",
         ScopeOutput => $"Output: {_wl.GetOutputDeviceById(entry.DeviceId)?.Name ?? entry.DeviceId ?? "(none)"}",
         _ => $"{_wl.GetChannelById(entry.ChannelId)?.Name ?? entry.ChannelId ?? "(none)"} · " +
@@ -166,6 +203,13 @@ public sealed class HotkeyActionExecutor
         var aim = ResolveAim(action, context, osd);
         if (aim is null) return;
 
+        if (IsWindowsScope(aim.Value.Scope))
+        {
+            ExecuteWindows(aim.Value.Scope, mode == "toggle" ? "toggle_mute" : mode, action, osd);
+            return;
+        }
+        if (!RequireWaveLink(osd)) return;
+
         // "mute" and "unmute" set an absolute state and are sent even if it
         // already matches, so other tools watching Wave Link can rely on them as
         // on/off signals rather than having to track toggles.
@@ -185,7 +229,7 @@ public sealed class HotkeyActionExecutor
                 if (mix is null) return;
                 bool muted = Next(mix.IsMuted);
                 _wl.SetMix(mix.Id, isMuted: muted);
-                osd.Show($"Mix: {mix.Name}", Word(muted), null);
+                osd.Show($"{MuteEmoji(muted)} {mix.Name}", Word(muted), null);
                 return;
             }
             case ScopeOutput:
@@ -195,7 +239,7 @@ public sealed class HotkeyActionExecutor
                 var (device, port) = output.Value;
                 bool muted = Next(port.IsMuted);
                 _wl.SetOutput(device.Id, port.Id, isMuted: muted);
-                osd.Show($"Output: {device.Name}", Word(muted), null);
+                osd.Show($"{MuteEmoji(muted)} {device.Name}", Word(muted), null);
                 return;
             }
         }
@@ -208,7 +252,7 @@ public sealed class HotkeyActionExecutor
 
             bool newMute = Next(pair.Value.Mix.IsMuted);
             _wl.SetChannelMix(pair.Value.Channel.Id, pair.Value.Mix.Id, isMuted: newMute);
-            osd.Show(PairTitle(pair.Value.Channel, pair.Value.Mix.Id), Word(newMute), null);
+            osd.Show($"{MuteEmoji(newMute)} {pair.Value.Channel.Name} · {MixName(pair.Value.Mix.Id)}", Word(newMute), null);
             return;
         }
 
@@ -217,7 +261,7 @@ public sealed class HotkeyActionExecutor
         {
             bool newMute = Next(channel.IsMuted);
             _wl.SetChannel(channel.Id, isMuted: newMute);
-            osd.Show($"Channel: {channel.Name}", Word(newMute), null);
+            ShowChannel(osd, MuteEmoji(newMute), channel, aim.Value.FocusedApp, Word(newMute), null);
             return;
         }
 
@@ -227,8 +271,46 @@ public sealed class HotkeyActionExecutor
         {
             bool newMute = Next(inputDevice.Inputs[0].IsMuted);
             _wl.SetInputMute(inputDevice.Id, inputDevice.Inputs[0].Id, newMute);
-            osd.Show($"Input: {inputDevice.Name}", Word(newMute), null);
+            osd.Show($"{MuteEmoji(newMute)} {inputDevice.Name}", Word(newMute), null);
         }
+    }
+
+    /// <summary>
+    /// "Music" for a channel; "Music · Spotify" with Spotify's icon when the
+    /// channel was reached as the focused app's channel.
+    /// </summary>
+    private static void ShowChannel(Osd osd, string emoji, Channel channel, string? focusedApp, string? text, int? slider)
+    {
+        if (focusedApp is null)
+            osd.Show($"{emoji} {channel.Name}", text, slider);
+        else
+            osd.Show($"{emoji} {channel.Name} · {focusedApp}", text, slider, iconForApp: focusedApp);
+    }
+
+    /// <summary>
+    /// Focused App's Volume and Native Volume Controls, both through Windows.
+    /// The work runs off the hook thread; the OSD follows when it's done, naming
+    /// the app (with its icon) or the playback device.
+    /// </summary>
+    private void ExecuteWindows(string scope, string mode, HotkeyAction action, Osd osd)
+    {
+        int step = ResolveStep(action);
+        int value = Math.Clamp(action.Value ?? 50, 0, 100);
+
+        void Report(AppVolumeResult r)
+        {
+            if (r.Problem is not null)
+                osd.Show(r.AppName, r.Problem, null, r.ExePath);
+            else if (r.Muted is bool muted)
+                osd.Show($"{MuteEmoji(muted)} {r.AppName}", muted ? "Muted" : "Unmuted", null, r.ExePath);
+            else
+                osd.Show($"{LevelEmoji(r.Previous ?? r.Percent ?? 0, r.Percent ?? 0)} {r.AppName}", null, r.Percent, r.ExePath);
+        }
+
+        if (scope == ScopeSystem)
+            _appAudio.ApplyToSystem(mode, step, value, Report);
+        else
+            _appAudio.ApplyToFocusedApp(mode, step, value, Report);
     }
 
     private void ExecuteVolume(HotkeyAction action, string mode, ActionContext context, Osd osd)
@@ -236,12 +318,20 @@ public sealed class HotkeyActionExecutor
         var aim = ResolveAim(action, context, osd);
         if (aim is null) return;
 
+        if (IsWindowsScope(aim.Value.Scope))
+        {
+            ExecuteWindows(aim.Value.Scope, mode, action, osd);
+            return;
+        }
+        if (!RequireWaveLink(osd)) return;
+
         int Apply(double currentLevel) => mode switch
         {
             "set" => Math.Clamp(action.Value ?? 50, 0, 100),
             "down" => Math.Clamp((int)Math.Round(currentLevel * 100) - ResolveStep(action), 0, 100),
             _ => Math.Clamp((int)Math.Round(currentLevel * 100) + ResolveStep(action), 0, 100)
         };
+        static int Percent(double level) => (int)Math.Round(level * 100);
 
         switch (aim.Value.Scope)
         {
@@ -250,10 +340,11 @@ public sealed class HotkeyActionExecutor
                 var mix = _wl.GetMixById(aim.Value.MixId);
                 if (mix is null) return;
                 string key = "mix:" + mix.Id;
-                int level = Apply(Base(key, mix.Level));
+                double current = Base(key, mix.Level);
+                int level = Apply(current);
                 Remember(key, level / 100.0);
                 _wl.SetMix(mix.Id, level: level / 100.0);
-                osd.Show($"Mix Volume: {mix.Name}", null, level);
+                osd.Show($"{LevelEmoji(Percent(current), level)} {mix.Name}", null, level);
                 return;
             }
             case ScopeOutput:
@@ -262,10 +353,11 @@ public sealed class HotkeyActionExecutor
                 if (output is null) return;
                 var (device, port) = output.Value;
                 string key = "out:" + device.Id + "/" + port.Id;
-                int level = Apply(Base(key, port.Level));
+                double current = Base(key, port.Level);
+                int level = Apply(current);
                 Remember(key, level / 100.0);
                 _wl.SetOutput(device.Id, port.Id, level: level / 100.0);
-                osd.Show($"Output Volume: {device.Name}", null, level);
+                osd.Show($"{LevelEmoji(Percent(current), level)} {device.Name}", null, level);
                 return;
             }
         }
@@ -278,15 +370,17 @@ public sealed class HotkeyActionExecutor
 
             int newVolume = Apply(pair.Value.Mix.Level);
             _wl.SetChannelMix(pair.Value.Channel.Id, pair.Value.Mix.Id, level: newVolume / 100.0);
-            osd.Show($"Volume: {pair.Value.Channel.Name} · {MixName(pair.Value.Mix.Id)}", null, newVolume);
+            osd.Show($"{LevelEmoji(Percent(pair.Value.Mix.Level), newVolume)} {pair.Value.Channel.Name} · {MixName(pair.Value.Mix.Id)}",
+                null, newVolume);
             return;
         }
 
         var channel = _wl.GetChannelById(channelId);
         if (channel is null) return;
+        int before = Percent(channel.Level);
         int newChannelVolume = Apply(channel.Level);
         _wl.SetChannel(channel.Id, level: newChannelVolume / 100.0);
-        osd.Show($"Volume: {channel.Name}", null, newChannelVolume);
+        ShowChannel(osd, LevelEmoji(before, newChannelVolume), channel, aim.Value.FocusedApp, null, newChannelVolume);
     }
 
     private int ResolveStep(HotkeyAction action)
@@ -411,21 +505,6 @@ public sealed class HotkeyActionExecutor
         if (channel is null) return;
         _wl.AddToChannel(app.Id, channel.Id);
         osd.Show(app.Name, $"Moved to {channel.Name}", null);
-    }
-
-    private void ExecuteAppVolume(HotkeyAction action, string mode, Osd osd)
-    {
-        int step = ResolveStep(action);
-        int value = Math.Clamp(action.Value ?? 50, 0, 100);
-        _appAudio.ApplyToFocusedApp(mode, step, value, result =>
-        {
-            if (result.Problem is not null)
-                osd.Show(result.AppName, result.Problem, null);
-            else if (result.Muted is bool muted)
-                osd.Show($"App: {result.AppName}", muted ? "Muted" : "Unmuted", null);
-            else
-                osd.Show($"App Volume: {result.AppName}", null, result.Percent);
-        });
     }
 
     // ─── Media ──────────────────────────────────────────────────────────────────

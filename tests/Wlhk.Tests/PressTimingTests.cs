@@ -42,7 +42,8 @@ public sealed class PressTimingTests
 
         Press(engine);
         Assert.Equal(0, Taps(wl)); // not yet: it might still become a double
-        await Task.Delay(500);
+        await WaitUntil(() => Taps(wl) == 1);
+        await Task.Delay(400); // and it doesn't run twice
 
         Assert.Equal(1, Taps(wl));
         Assert.Equal(0, Doubles(wl));
@@ -56,7 +57,8 @@ public sealed class PressTimingTests
         Press(engine);
         Press(engine);
         Press(engine);
-        await Task.Delay(500);
+        await WaitUntil(() => Taps(wl) == 1);
+        await Task.Delay(400);
 
         Assert.Equal(1, Doubles(wl)); // the third press must not start a second double
         Assert.Equal(1, Taps(wl));
@@ -70,7 +72,7 @@ public sealed class PressTimingTests
         Press(engine);
         await Task.Delay(450);
         Press(engine);
-        await Task.Delay(450);
+        await WaitUntil(() => Taps(wl) == 2);
 
         Assert.Equal(2, Taps(wl));
         Assert.Equal(0, Doubles(wl));
@@ -132,6 +134,18 @@ public sealed class PressTimingTests
 
         Assert.Equal("a", state.Current()!.Id); // what's in effect right now
         Assert.Equal("b", state.ActiveId);      // what would be remembered
+    }
+
+    /// <summary>
+    /// Wait for something that should happen, up to a generous limit. Fixed sleeps
+    /// make "it happened" tests fail on a loaded machine; "it didn't happen" tests
+    /// keep fixed waits, since a slow machine can only make those pass.
+    /// </summary>
+    private static async Task WaitUntil(Func<bool> condition, int timeoutMs = 3000)
+    {
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        while (!condition() && watch.ElapsedMilliseconds < timeoutMs)
+            await Task.Delay(20);
     }
 
     private static void Press(HotkeyEngine engine)

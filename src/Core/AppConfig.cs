@@ -83,14 +83,25 @@ public sealed class LegacyGlobalFeatures
 public sealed class TargetEntry
 {
     public string Id { get; set; } = "";
-    /// <summary>Null or "channel", "mix", "output" or "focused_app"; same meaning as HotkeyAction.Scope.</summary>
+    /// <summary>
+    /// Null or "channel", "mix", "output", "focused_app" (the focused app's Wave
+    /// Link channel), "app_volume" (the focused app's own Windows volume) or
+    /// "system" (the default Windows device); same meaning as HotkeyAction.Scope.
+    /// </summary>
     public string? Scope { get; set; }
     public string? ChannelId { get; set; }
     /// <summary>Channel scope: null means All Mixes. Mix scope: the mix itself.</summary>
     public string? MixId { get; set; }
     /// <summary>Output scope: the output device.</summary>
     public string? DeviceId { get; set; }
-    /// <summary>Optional "ctrl"/"alt"/"shift"/"win": hold it to aim at this target.</summary>
+    /// <summary>
+    /// Keys that, while all held, aim Active Target actions at this entry: a
+    /// custom modifier. Modifiers by family ("CTRL", "ALT", "SHIFT", "WIN") and any
+    /// other key by name ("F13", "CAPS LOCK"), so "CTRL"+"SHIFT" or "F13" both work.
+    /// </summary>
+    public List<string>? HoldKeys { get; set; }
+
+    /// <summary>Pre-release 2.6 single modifier ("ctrl"/"alt"/"shift"/"win"). Read only, upgraded to HoldKeys.</summary>
     public string? Modifier { get; set; }
 }
 
@@ -128,6 +139,13 @@ public sealed class AppConfig
 
     /// <summary>v2.6: active target saved when PersistentTarget is on.</summary>
     public string? ActiveTargetId { get; set; }
+
+    /// <summary>
+    /// v2.6: what "Focused App's Channel" uses when the focused app isn't routed
+    /// to any Wave Link channel. Null shows a message instead. Never "active" or
+    /// "focused_app" (that would loop).
+    /// </summary>
+    public TargetEntry? FocusedAppFallback { get; set; }
 
     [JsonPropertyName("globalFeatures")]
     public LegacyGlobalFeatures? LegacyGlobalFeatures { get; set; }
@@ -250,7 +268,13 @@ public sealed class ConfigStore
         c.Targets ??= new();
         c.Targets.RemoveAll(t => t is null);
         foreach (var t in c.Targets)
+        {
             if (string.IsNullOrEmpty(t.Id)) t.Id = TargetState.NewId();
+            if (t.HoldKeys is null && EffectiveBindings.ParseModifier(t.Modifier) is not null)
+                t.HoldKeys = [t.Modifier!.ToUpperInvariant()];
+            t.Modifier = null;
+            if (t.HoldKeys is { Count: 0 }) t.HoldKeys = null;
+        }
         return c;
     }
 

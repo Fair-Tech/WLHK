@@ -205,7 +205,10 @@ public sealed class ActiveTargetTests
         var effective = EffectiveBindings.Build(config);
 
         Assert.Equal(["F13"], effective.Dynamic.ToArray());
-        Assert.Equal([(ModifierFamily.Shift, "b")], effective.TargetModifiers.ToArray());
+        var chord = Assert.Single(effective.TargetChords);
+        Assert.Equal("b", chord.TargetId);
+        Assert.Equal([ModifierFamily.Shift], chord.Modifiers.ToArray());
+        Assert.Empty(chord.Keys);
     }
 
     // ─── Hook: modifier redirect ────────────────────────────────────────────────

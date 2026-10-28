@@ -339,8 +339,8 @@ public sealed class WaveLinkCapabilityTests
     // ─── Executor: Windows app volume ───────────────────────────────────────────
 
     [Theory]
-    [InlineData("up", "App Volume: Spotify", null, 60)]
-    [InlineData("toggle_mute", "App: Spotify", "Muted", null)]
+    [InlineData("up", "🔊 Spotify", null, 60)]
+    [InlineData("toggle_mute", "🔇 Spotify", "Muted", null)]
     public void AppVolumeReportsWhatWindowsDid(string mode, string title, string? text, int? percent)
     {
         var reply = mode == "up"

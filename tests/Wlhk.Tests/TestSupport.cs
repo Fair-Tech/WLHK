@@ -117,9 +117,20 @@ internal sealed class FakeAppAudio(AppVolumeResult reply) : IAppAudio
 {
     public List<(string Mode, int Step, int Value)> Requests { get; } = [];
 
+    /// <summary>Which Windows target each request went to: "app" or "system".</summary>
+    public List<string> Scopes { get; } = [];
+
     public void ApplyToFocusedApp(string mode, int step, int value, Action<AppVolumeResult> done)
     {
         Requests.Add((mode, step, value));
+        Scopes.Add("app");
+        done(reply);
+    }
+
+    public void ApplyToSystem(string mode, int step, int value, Action<AppVolumeResult> done)
+    {
+        Requests.Add((mode, step, value));
+        Scopes.Add("system");
         done(reply);
     }
 }

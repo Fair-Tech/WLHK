@@ -4,10 +4,17 @@ using System.Runtime.InteropServices;
 
 namespace Wlhk.Core;
 
-/// <summary>Result of an app-volume change, for the OSD.</summary>
-public readonly record struct AppVolumeResult(string AppName, int? Percent, bool? Muted, string? Problem);
+/// <summary>
+/// Result of a Windows volume change, for the OSD. ExePath lets the OSD show the
+/// app's icon; Previous (the level before) picks the up or down speaker emoji.
+/// </summary>
+public readonly record struct AppVolumeResult(string AppName, int? Percent, bool? Muted, string? Problem,
+    string? ExePath = null, int? Previous = null);
 
-/// <summary>Per-app volume, as in the Windows Volume Mixer. Abstracted for tests.</summary>
+/// <summary>The app behind the foreground window.</summary>
+public readonly record struct ForegroundAppInfo(string Name, string? ProcessName, string? ExePath);
+
+/// <summary>Windows volume: per-app (Volume Mixer) and the default device. Abstracted for tests.</summary>
 public interface IAppAudio
 {
     /// <summary>
@@ -16,6 +23,9 @@ public interface IAppAudio
     /// the outcome from a background thread.
     /// </summary>
     void ApplyToFocusedApp(string mode, int step, int value, Action<AppVolumeResult> done);
+
+    /// <summary>Same modes, applied to the default Windows playback device.</summary>
+    void ApplyToSystem(string mode, int step, int value, Action<AppVolumeResult> done);
 }
 
 /// <summary>
@@ -50,6 +60,10 @@ public sealed unsafe class AppAudio : IAppAudio, IDisposable
     private static readonly Guid IID_IAudioSessionManager2 = new("77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F");
     private static readonly Guid IID_IAudioSessionControl2 = new("BFB7FF88-7239-4FC9-8FA2-07C950BE9C6D");
     private static readonly Guid IID_ISimpleAudioVolume = new("87CE5498-68D6-44E5-9215-6DA47EF883D8");
+    private static readonly Guid IID_IAudioEndpointVolume = new("5CDF2C82-841E-4546-9722-0CF74078229A");
+    private static readonly Guid PKEY_Device_FriendlyName_Fmtid = new("A45C254E-DF1C-4EFD-8020-67D146A850E0");
+    private const uint PKEY_Device_FriendlyName_Pid = 14;
+    private const int eMultimedia = 1;
 
     private const int eRender = 0;
     private const uint DEVICE_STATE_ACTIVE = 1;
@@ -73,6 +87,38 @@ public sealed unsafe class AppAudio : IAppAudio, IDisposable
             done(result);
         });
     }
+
+    public void ApplyToSystem(string mode, int step, int value, Action<AppVolumeResult> done)
+    {
+        Post(() =>
+        {
+            AppVolumeResult result;
+            try { result = ApplySystem(mode, step, value); }
+            catch (Exception ex)
+            {
+                Log.Error("AppAudio system", ex);
+                result = new AppVolumeResult("Windows", null, null, "Couldn't reach Windows audio");
+            }
+            done(result);
+        });
+    }
+
+    /// <summary>The app behind the foreground window right now, or null. Any thread.</summary>
+    public static ForegroundAppInfo? Foreground()
+    {
+        uint pid = TargetProcessId(GetForegroundWindow());
+        if (pid == 0) return null;
+        string? exe = ProcessName(pid);
+        var (name, path) = Identity(pid, exe);
+        return new ForegroundAppInfo(name, exe, path);
+    }
+
+    /// <summary>Diagnostics: the default device's name, level and mute.</summary>
+    internal AppVolumeResult InspectSystem() => RunOnWorker(() => ApplySystem("inspect", 0, 0));
+
+    /// <summary>Diagnostics: apply a mode to the default device synchronously.</summary>
+    internal AppVolumeResult ApplyToSystemNow(string mode, int step, int value) =>
+        RunOnWorker(() => ApplySystem(mode, step, value));
 
     /// <summary>Diagnostics: every live session on every playback device.</summary>
     internal readonly record struct SessionInfo(uint Pid, string? Process, float Volume, bool Muted);
@@ -138,12 +184,16 @@ public sealed unsafe class AppAudio : IAppAudio, IDisposable
             return new AppVolumeResult("App Volume", null, null, "No focused app");
 
         string? exe = ProcessName(pid);
-        string display = DisplayName(pid, exe);
+        var (display, exePath) = Identity(pid, exe);
         var sessions = FindSessions(pid, exe);
         try
         {
             if (sessions.Count == 0)
-                return new AppVolumeResult(display, null, null, "No audio from this app");
+                return new AppVolumeResult(display, null, null, "No audio from this app", exePath);
+
+            // Steps start from the loudest session, so one quiet stray session
+            // can't make the whole app jump.
+            int before = (int)Math.Round(sessions.Max(GetVolume) * 100);
 
             if (mode == "refresh")
             {
@@ -154,7 +204,7 @@ public sealed unsafe class AppAudio : IAppAudio, IDisposable
                     SetVolume(v, GetVolume(v));
                     SetMute(v, GetMute(v));
                 }
-                return new AppVolumeResult(display, (int)Math.Round(sessions.Max(GetVolume) * 100), null, null);
+                return new AppVolumeResult(display, before, null, null, exePath, before);
             }
 
             if (mode is "toggle_mute" or "mute" or "unmute")
@@ -162,26 +212,119 @@ public sealed unsafe class AppAudio : IAppAudio, IDisposable
                 bool anyAudible = sessions.Any(v => !GetMute(v));
                 bool mute = mode switch { "mute" => true, "unmute" => false, _ => anyAudible };
                 foreach (var v in sessions) SetMute(v, mute);
-                return new AppVolumeResult(display, null, mute, null);
+                return new AppVolumeResult(display, null, mute, null, exePath);
             }
 
-            // Steps start from the loudest session, so one quiet stray session
-            // can't make the whole app jump.
-            float current = sessions.Max(GetVolume);
-            int percent = mode switch
-            {
-                "set" => value,
-                "down" => (int)Math.Round(current * 100) - step,
-                _ => (int)Math.Round(current * 100) + step
-            };
-            percent = Math.Clamp(percent, 0, 100);
+            int percent = Math.Clamp(Step(before, mode, step, value), 0, 100);
             foreach (var v in sessions) SetVolume(v, percent / 100f);
-            return new AppVolumeResult(display, percent, null, null);
+            return new AppVolumeResult(display, percent, null, null, exePath, before);
         }
         finally
         {
             foreach (var v in sessions) Release(v);
         }
+    }
+
+    private static int Step(int current, string mode, int step, int value) => mode switch
+    {
+        "set" => value,
+        "down" => current - step,
+        _ => current + step
+    };
+
+    /// <summary>
+    /// The default playback device through IAudioEndpointVolume: the same level
+    /// the Windows volume slider and keyboard volume keys change.
+    /// </summary>
+    private AppVolumeResult ApplySystem(string mode, int step, int value)
+    {
+        nint enumerator = Enumerator();
+        if (enumerator == 0)
+            return new AppVolumeResult("Windows", null, null, "Couldn't reach Windows audio");
+
+        // IMMDeviceEnumerator: 4 GetDefaultAudioEndpoint
+        nint device = 0;
+        if (((delegate* unmanaged[Stdcall]<nint, int, int, nint*, int>)Slot(enumerator, 4))
+                (enumerator, eRender, eMultimedia, &device) < 0 || device == 0)
+            return new AppVolumeResult("Windows", null, null, "No playback device");
+        try
+        {
+            string name = DeviceName(device) ?? "Windows";
+            nint endpoint = 0;
+            Guid iid = IID_IAudioEndpointVolume;
+            if (((delegate* unmanaged[Stdcall]<nint, Guid*, uint, nint, nint*, int>)Slot(device, 3))
+                    (device, &iid, CLSCTX_ALL, 0, &endpoint) < 0)
+                return new AppVolumeResult(name, null, null, "Couldn't reach this device");
+            try
+            {
+                // IAudioEndpointVolume: 7 SetMasterVolumeLevelScalar, 9 GetMasterVolumeLevelScalar,
+                // 14 SetMute, 15 GetMute
+                float level = 0;
+                ((delegate* unmanaged[Stdcall]<nint, float*, int>)Slot(endpoint, 9))(endpoint, &level);
+                int muted = 0;
+                ((delegate* unmanaged[Stdcall]<nint, int*, int>)Slot(endpoint, 15))(endpoint, &muted);
+                int before = (int)Math.Round(level * 100);
+
+                switch (mode)
+                {
+                    case "inspect":
+                        return new AppVolumeResult(name, before, muted != 0, null, null, before);
+                    case "refresh":
+                        ((delegate* unmanaged[Stdcall]<nint, float, Guid*, int>)Slot(endpoint, 7))(endpoint, level, null);
+                        ((delegate* unmanaged[Stdcall]<nint, int, Guid*, int>)Slot(endpoint, 14))(endpoint, muted, null);
+                        return new AppVolumeResult(name, before, muted != 0, null, null, before);
+                    case "toggle_mute" or "mute" or "unmute":
+                    {
+                        bool mute = mode switch { "mute" => true, "unmute" => false, _ => muted == 0 };
+                        ((delegate* unmanaged[Stdcall]<nint, int, Guid*, int>)Slot(endpoint, 14))(endpoint, mute ? 1 : 0, null);
+                        return new AppVolumeResult(name, null, mute, null);
+                    }
+                    default:
+                    {
+                        int percent = Math.Clamp(Step(before, mode, step, value), 0, 100);
+                        ((delegate* unmanaged[Stdcall]<nint, float, Guid*, int>)Slot(endpoint, 7))(endpoint, percent / 100f, null);
+                        return new AppVolumeResult(name, percent, null, null, null, before);
+                    }
+                }
+            }
+            finally { Release(endpoint); }
+        }
+        finally { Release(device); }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PropertyKey
+    {
+        public Guid Fmtid;
+        public uint Pid;
+    }
+
+    /// <summary>"Speakers (NVIDIA High Definition Audio)" from the device's property store.</summary>
+    private static string? DeviceName(nint device)
+    {
+        // IMMDevice: 4 OpenPropertyStore (STGM_READ = 0)
+        nint store = 0;
+        if (((delegate* unmanaged[Stdcall]<nint, uint, nint*, int>)Slot(device, 4))(device, 0, &store) < 0 || store == 0)
+            return null;
+        try
+        {
+            var key = new PropertyKey { Fmtid = PKEY_Device_FriendlyName_Fmtid, Pid = PKEY_Device_FriendlyName_Pid };
+            // PROPVARIANT is 24 bytes on x64: vt at 0, value at 8.
+            byte* value = stackalloc byte[24];
+            new Span<byte>(value, 24).Clear();
+            // IPropertyStore: 5 GetValue
+            if (((delegate* unmanaged[Stdcall]<nint, PropertyKey*, byte*, int>)Slot(store, 5))(store, &key, value) < 0)
+                return null;
+            try
+            {
+                const ushort VT_LPWSTR = 31;
+                return *(ushort*)value == VT_LPWSTR && *(char**)(value + 8) != null
+                    ? new string(*(char**)(value + 8))
+                    : null;
+            }
+            finally { PropVariantClear(value); }
+        }
+        finally { Release(store); }
     }
 
     /// <summary>The process behind the foreground window, seeing through UWP's frame host.</summary>
@@ -357,21 +500,25 @@ public sealed unsafe class AppAudio : IAppAudio, IDisposable
         catch { return null; }
     }
 
-    /// <summary>"Google Chrome" rather than "chrome" when the exe says so.</summary>
-    private static string DisplayName(uint pid, string? exe)
+    /// <summary>
+    /// Display name ("Google Chrome" rather than "chrome" when the exe says so)
+    /// and executable path, for the OSD's title and icon.
+    /// </summary>
+    private static (string Name, string? Path) Identity(uint pid, string? exe)
     {
+        string? path = null;
         try
         {
             using var p = Process.GetProcessById((int)pid);
-            string? path = p.MainModule?.FileName;
+            path = p.MainModule?.FileName;
             if (path is not null)
             {
                 string? description = FileVersionInfo.GetVersionInfo(path).FileDescription;
-                if (!string.IsNullOrWhiteSpace(description)) return description.Trim();
+                if (!string.IsNullOrWhiteSpace(description)) return (description.Trim(), path);
             }
         }
         catch { }
-        return exe ?? "App";
+        return (exe ?? "App", path);
     }
 
     public void Dispose()
@@ -382,6 +529,7 @@ public sealed unsafe class AppAudio : IAppAudio, IDisposable
     private delegate bool EnumWindowsProc(nint hwnd, nint lParam);
 
     [DllImport("ole32.dll")] private static extern int CoInitializeEx(nint reserved, uint coInit);
+    [DllImport("ole32.dll")] private static extern int PropVariantClear(byte* propVariant);
     [DllImport("ole32.dll")] private static extern int CoCreateInstance(Guid* clsid, nint outer, uint context, Guid* iid, out nint ppv);
     [DllImport("user32.dll")] private static extern nint GetForegroundWindow();
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(nint hwnd, out uint pid);

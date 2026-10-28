@@ -3,6 +3,15 @@ namespace Wlhk.Core;
 public enum ModifierFamily { Ctrl, Alt, Shift, Win }
 
 /// <summary>
+/// A target entry's custom modifier: every listed modifier and key must be held.
+/// Modifiers are matched by family (either Ctrl key counts as CTRL).
+/// </summary>
+public sealed record TargetChord(IReadOnlySet<ModifierFamily> Modifiers, IReadOnlySet<string> Keys, string TargetId)
+{
+    public int Size => Modifiers.Count + Keys.Count;
+}
+
+/// <summary>
 /// Everything the hook and engine need to act on a config: the recorded hotkeys
 /// plus the bindings the Volume Keys setting synthesises for the keyboard volume keys.
 ///
@@ -34,8 +43,15 @@ public sealed class EffectiveBindings
     /// </summary>
     public IReadOnlySet<string> GlobalOnly { get; private init; } = new HashSet<string>();
 
-    /// <summary>Target modifiers in list order (first match wins).</summary>
-    public IReadOnlyList<(ModifierFamily Family, string TargetId)> TargetModifiers { get; private init; } = [];
+    /// <summary>Target chords, most specific first, then in list order.</summary>
+    public IReadOnlyList<TargetChord> TargetChords { get; private init; } = [];
+
+    /// <summary>
+    /// Non-modifier keys used in a chord. They're held as modifiers rather than
+    /// pressed as keys, so the hook swallows them instead of letting them type
+    /// or trigger anything.
+    /// </summary>
+    public IReadOnlySet<string> ChordKeys { get; private init; } = new HashSet<string>();
 
     public static EffectiveBindings Build(AppConfig config)
     {
@@ -59,10 +75,29 @@ public sealed class EffectiveBindings
                 UsesActiveTarget(binding.DoublePressAction))
                 dynamic.Add(combo);
 
-        var modifiers = new List<(ModifierFamily, string)>();
+        var chords = new List<TargetChord>();
         foreach (var target in config.Targets ?? [])
-            if (ParseModifier(target.Modifier) is ModifierFamily family && !string.IsNullOrEmpty(target.Id))
-                modifiers.Add((family, target.Id));
+        {
+            if (string.IsNullOrEmpty(target.Id)) continue;
+            // The pre-release single Modifier only ever held a modifier name; anything
+            // else in it is junk, not a key to hold.
+            var keys = target.HoldKeys
+                       ?? (ParseModifier(target.Modifier) is not null ? [target.Modifier!.ToUpperInvariant()] : null);
+            if (keys is not { Count: > 0 }) continue;
+
+            var families = new HashSet<ModifierFamily>();
+            var plain = new HashSet<string>(StringComparer.Ordinal);
+            foreach (string key in keys)
+            {
+                if (ParseModifier(key) is ModifierFamily family) families.Add(family);
+                else if (!string.IsNullOrWhiteSpace(key)) plain.Add(key);
+            }
+            if (families.Count + plain.Count > 0)
+                chords.Add(new TargetChord(families, plain, target.Id));
+        }
+        // Most specific first, so holding Ctrl+Shift picks a Ctrl+Shift entry over
+        // a plain Shift one. OrderBy is stable, keeping list order among equals.
+        chords = chords.OrderByDescending(c => c.Size).ToList();
 
         return new EffectiveBindings
         {
@@ -70,7 +105,8 @@ public sealed class EffectiveBindings
             Mapped = new HashSet<string>(bindings.Keys, StringComparer.Ordinal),
             Dynamic = dynamic,
             GlobalOnly = globalOnly,
-            TargetModifiers = modifiers
+            TargetChords = chords,
+            ChordKeys = new HashSet<string>(chords.SelectMany(c => c.Keys), StringComparer.Ordinal)
         };
 
         void AddGlobal(string combo, HotkeyAction action, bool autoRepeat)
@@ -96,14 +132,34 @@ public sealed class EffectiveBindings
         }
     }
 
-    public static ModifierFamily? ParseModifier(string? value) => value?.ToLowerInvariant() switch
+    /// <summary>Modifier family for a key name, side-agnostic (LCTRL and RCTRL are both CTRL).</summary>
+    public static ModifierFamily? ParseModifier(string? value) => value?.ToUpperInvariant() switch
     {
-        "ctrl" => ModifierFamily.Ctrl,
-        "alt" => ModifierFamily.Alt,
-        "shift" => ModifierFamily.Shift,
-        "win" => ModifierFamily.Win,
+        "CTRL" or "LCTRL" or "RCTRL" => ModifierFamily.Ctrl,
+        "ALT" or "LALT" or "RALT" => ModifierFamily.Alt,
+        "SHIFT" or "LSHIFT" or "RSHIFT" => ModifierFamily.Shift,
+        "WIN" or "LWIN" or "RWIN" => ModifierFamily.Win,
         _ => null
     };
+
+    /// <summary>"Ctrl + Shift", "F13", "Caps Lock + F13" for display.</summary>
+    public static string DescribeChord(IReadOnlyList<string>? keys)
+    {
+        if (keys is not { Count: > 0 }) return "None";
+        return string.Join(" + ", keys.Select(k => ParseModifier(k) switch
+        {
+            ModifierFamily.Ctrl => "Ctrl",
+            ModifierFamily.Alt => "Alt",
+            ModifierFamily.Shift => "Shift",
+            ModifierFamily.Win => "Win",
+            _ => TitleCase(k)
+        }));
+    }
+
+    /// <summary>"CAPS LOCK" -> "Caps Lock", "F13" stays "F13".</summary>
+    private static string TitleCase(string key) =>
+        string.Join(" ", key.Split(' ').Select(w =>
+            w.Length > 1 && w.All(char.IsLetter) ? w[0] + w[1..].ToLowerInvariant() : w));
 
     private static bool UsesActiveTarget(HotkeyAction? action) =>
         action is not null && ActionCatalog.IsScoped(ActionCatalog.Resolve(action).Kind) &&

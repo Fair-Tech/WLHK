@@ -71,13 +71,14 @@ public sealed class KeyboardHook : IDisposable
     private HashSet<string> _suppressSet = new();
     private volatile bool _suppressionEnabled = true;
 
-    /// <summary>Target-modifier and Volume Keys data, published as one unit.</summary>
+    /// <summary>Target-chord and Volume Keys data, published as one unit.</summary>
     private sealed record ResolutionInfo(
         IReadOnlySet<string> Dynamic,
         IReadOnlySet<string> GlobalOnly,
-        IReadOnlyList<(ModifierFamily Family, string TargetId)> TargetModifiers);
+        IReadOnlyList<TargetChord> TargetChords,
+        IReadOnlySet<string> ChordKeys);
 
-    private ResolutionInfo _info = new(new HashSet<string>(), new HashSet<string>(), []);
+    private ResolutionInfo _info = new(new HashSet<string>(), new HashSet<string>(), [], new HashSet<string>());
     private volatile bool _globalFeaturesActive;
 
     // Recording mode: capture the next combo instead of dispatching it.
@@ -86,7 +87,15 @@ public sealed class KeyboardHook : IDisposable
     // The key captured while recording, so its matching UP is swallowed too.
     private uint _recordingSwallowVk;
 
+    // Chord recording: capture every key held until the first is released.
+    private volatile Action<List<string>>? _chordCallback;
+    private readonly List<string> _chordRecorded = new();
+    private readonly HashSet<uint> _chordHeldVks = new();
+    // Non-modifier keys whose release must be swallowed (held when a recording ended).
+    private readonly HashSet<uint> _swallowUntilUp = new();
+
     // Hook-thread-only state (no locking needed).
+    private readonly HashSet<string> _heldKeys = new(StringComparer.Ordinal);
     private readonly Dictionary<uint, string> _activeCombos = new();
     private readonly Dictionary<uint, string?> _activeOverrides = new();
     private bool _lCtrl, _rCtrl, _lAlt, _rAlt, _lShift, _rShift, _lWin, _rWin;
@@ -124,7 +133,8 @@ public sealed class KeyboardHook : IDisposable
 
     /// <summary>Publish target modifiers and Volume Keys combos. Call on any config change.</summary>
     public void SetResolutionInfo(EffectiveBindings bindings) =>
-        Volatile.Write(ref _info, new ResolutionInfo(bindings.Dynamic, bindings.GlobalOnly, bindings.TargetModifiers));
+        Volatile.Write(ref _info, new ResolutionInfo(
+            bindings.Dynamic, bindings.GlobalOnly, bindings.TargetChords, bindings.ChordKeys));
 
     /// <summary>
     /// The Volume Keys setting only takes over the keys while Wave Link is connected.
@@ -146,6 +156,15 @@ public sealed class KeyboardHook : IDisposable
     public void CancelRecording() => _recordingCallback = null;
 
     public bool IsRecording => _recordingCallback is not null;
+
+    /// <summary>
+    /// Record a custom modifier for a target entry: every key pressed until the
+    /// first one is released, e.g. Ctrl+Shift, F13, or Caps Lock+F13. Modifiers
+    /// are reported by family ("CTRL"), other keys by name ("F13").
+    /// </summary>
+    public void BeginChordRecording(Action<List<string>> callback) => _chordCallback = callback;
+
+    public void CancelChordRecording() => _chordCallback = null;
 
     private void HookThread()
     {
@@ -188,12 +207,41 @@ public sealed class KeyboardHook : IDisposable
         if (KeyNames.IsModifier((int)vk))
         {
             TrackModifier(vk, isDown);
+            if (_chordCallback is not null)
+            {
+                // Modifiers are recorded but still reach Windows, so no key is left
+                // looking held. Releasing one ends the recording.
+                string family = ModifierFamilyName(vk);
+                if (isDown && !_chordRecorded.Contains(family)) _chordRecorded.Add(family);
+                else if (isUp && _chordRecorded.Count > 0) FinishChord();
+            }
             return CallNextHookEx(_hook, nCode, wParam, lParam);
         }
 
         string? baseName = KeyNames.BaseName((int)vk);
         if (baseName is null)
             return CallNextHookEx(_hook, nCode, wParam, lParam);
+
+        if (_chordCallback is not null)
+        {
+            if (isDown)
+            {
+                if (!_chordRecorded.Contains(baseName)) _chordRecorded.Add(baseName);
+                _chordHeldVks.Add(vk);
+            }
+            else
+            {
+                _chordHeldVks.Remove(vk);
+                FinishChord();
+            }
+            return 1;
+        }
+
+        if (_swallowUntilUp.Contains(vk))
+        {
+            if (isUp) _swallowUntilUp.Remove(vk);
+            return 1;
+        }
 
         // Recording mode: swallow the first non-modifier event and report it (v1 behavior,
         // except the main engine is paused during recording — fixes a v1 quirk where a
@@ -215,6 +263,14 @@ public sealed class KeyboardHook : IDisposable
             if (isUp) _recordingSwallowVk = 0;
             return 1;
         }
+
+        if (isDown) _heldKeys.Add(baseName);
+        else _heldKeys.Remove(baseName);
+
+        // A key used in a target's custom modifier is held, not pressed: it never
+        // types or triggers anything itself (unless hotkeys are switched off).
+        if (_suppressionEnabled && Volatile.Read(ref _info).ChordKeys.Contains(baseName))
+            return 1;
 
         string combo;
         string? targetOverride;
@@ -306,30 +362,72 @@ public sealed class KeyboardHook : IDisposable
         ComposeCombo(baseName, sideSpecific, exclude: null);
 
     /// <summary>
-    /// Resolve a press, then let a held target modifier redirect it. If the
-    /// combo as pressed isn't bound, but stripping a target modifier gives a combo
-    /// that has an Active Target action, the press runs that hotkey aimed at the
-    /// modifier's target: with Shift assigned to "Mic", SHIFT+F13 runs your F13
-    /// binding against Mic. A combo bound in its own right always wins, so this
-    /// never steals an existing SHIFT+F13 hotkey.
+    /// Resolve a press, then let a held target chord redirect it to its entry.
+    ///
+    /// Chords are custom modifiers. A chord of ordinary keys (F13, Caps Lock)
+    /// doesn't change the combo at all: while it's held, any Active Target hotkey
+    /// simply aims at the chord's entry. A chord with modifiers (Ctrl+Shift) is
+    /// stripped from the combo first, so with Shift assigned to "Mic", SHIFT+F13
+    /// runs your F13 binding against Mic. A combo bound in its own right is never
+    /// stripped, so a chord can't steal an existing SHIFT+F13 hotkey. The most
+    /// specific chord that applies wins.
     /// </summary>
     internal (string Combo, string? TargetOverride) ResolveWithTargets(string baseName)
     {
         string combo = ResolveCombo(baseName);
-        if (Volatile.Read(ref _suppressSet).Contains(combo))
+        var info = Volatile.Read(ref _info);
+        if (info.TargetChords.Count == 0)
             return (combo, null);
 
-        var info = Volatile.Read(ref _info);
-        foreach (var (family, targetId) in info.TargetModifiers)
+        bool comboBound = Volatile.Read(ref _suppressSet).Contains(combo);
+        foreach (var chord in info.TargetChords)
         {
-            if (!IsHeld(family)) continue;
-            string specific = ComposeCombo(baseName, sideSpecific: true, exclude: family);
-            if (info.Dynamic.Contains(specific)) return (specific, targetId);
-            string generic = ComposeCombo(baseName, sideSpecific: false, exclude: family);
-            if (info.Dynamic.Contains(generic)) return (generic, targetId);
+            if (!chord.Keys.All(_heldKeys.Contains) || !chord.Modifiers.All(IsHeld))
+                continue;
+
+            if (chord.Modifiers.Count == 0)
+            {
+                if (info.Dynamic.Contains(combo)) return (combo, chord.TargetId);
+                continue;
+            }
+            if (comboBound) continue;
+
+            string specific = ComposeCombo(baseName, sideSpecific: true, chord.Modifiers);
+            if (info.Dynamic.Contains(specific)) return (specific, chord.TargetId);
+            string generic = ComposeCombo(baseName, sideSpecific: false, chord.Modifiers);
+            if (info.Dynamic.Contains(generic)) return (generic, chord.TargetId);
         }
         return (combo, null);
     }
+
+    private void FinishChord()
+    {
+        var callback = _chordCallback;
+        _chordCallback = null;
+        if (callback is null) return;
+
+        // Modifiers first in the usual order, then keys in the order pressed.
+        var families = new[] { "CTRL", "ALT", "SHIFT", "WIN" };
+        var keys = families.Where(_chordRecorded.Contains)
+            .Concat(_chordRecorded.Where(k => !families.Contains(k)))
+            .ToList();
+        _chordRecorded.Clear();
+
+        // Keys still down were swallowed on the way down; swallow their release
+        // too so it can't reach anything as an unpaired key-up.
+        foreach (uint held in _chordHeldVks) _swallowUntilUp.Add(held);
+        _chordHeldVks.Clear();
+
+        if (keys.Count > 0) callback(keys);
+    }
+
+    private static string ModifierFamilyName(uint vk) => vk switch
+    {
+        0xA2 or 0xA3 or 0x11 => "CTRL",
+        0xA4 or 0xA5 or 0x12 => "ALT",
+        0xA0 or 0xA1 or 0x10 => "SHIFT",
+        _ => "WIN"
+    };
 
     private bool IsHeld(ModifierFamily family) => family switch
     {
@@ -340,16 +438,16 @@ public sealed class KeyboardHook : IDisposable
         _ => false
     };
 
-    private string ComposeCombo(string baseName, bool sideSpecific, ModifierFamily? exclude)
+    private string ComposeCombo(string baseName, bool sideSpecific, IReadOnlySet<ModifierFamily>? exclude)
     {
         bool lCtrl = _lCtrl, rCtrl = _rCtrl, lAlt = _lAlt, rAlt = _rAlt;
         bool lShift = _lShift, rShift = _rShift, lWin = _lWin, rWin = _rWin;
-        switch (exclude)
+        if (exclude is not null)
         {
-            case ModifierFamily.Ctrl: lCtrl = rCtrl = false; break;
-            case ModifierFamily.Alt: lAlt = rAlt = false; break;
-            case ModifierFamily.Shift: lShift = rShift = false; break;
-            case ModifierFamily.Win: lWin = rWin = false; break;
+            if (exclude.Contains(ModifierFamily.Ctrl)) lCtrl = rCtrl = false;
+            if (exclude.Contains(ModifierFamily.Alt)) lAlt = rAlt = false;
+            if (exclude.Contains(ModifierFamily.Shift)) lShift = rShift = false;
+            if (exclude.Contains(ModifierFamily.Win)) lWin = rWin = false;
         }
 
         bool ctrl = lCtrl || rCtrl, alt = lAlt || rAlt, shift = lShift || rShift, win = lWin || rWin;

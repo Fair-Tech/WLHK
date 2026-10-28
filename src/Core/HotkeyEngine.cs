@@ -49,11 +49,29 @@ public sealed class HotkeyEngine
         public bool ConsumedByDouble;
 
         /// <summary>
-        /// Bumped on every tap release. A deferred tap only runs if no later tap
-        /// came after it; a counter rather than a timestamp, because the system
-        /// tick (~15 ms) can make two releases look simultaneous.
+        /// The tap waiting out its double-press window. Only a double press inside
+        /// that window cancels it; a later, separate tap never does, even if this
+        /// one's timer runs late.
         /// </summary>
-        public long TapToken;
+        public PendingTap? Pending;
+    }
+
+    private sealed class PendingTap
+    {
+        public bool Cancelled;
+
+        /// <summary>
+        /// Held here on purpose: a Timer nothing references can be garbage
+        /// collected before it fires, which silently dropped the tap.
+        /// </summary>
+        public Timer? Timer;
+
+        public void Cancel()
+        {
+            Cancelled = true;
+            Timer?.Dispose();
+            Timer = null;
+        }
     }
 
     private readonly object _lock = new();
@@ -76,11 +94,12 @@ public sealed class HotkeyEngine
     }
 
     public HotkeyEngine(ConfigStore config, IWaveLinkControl wl, Action<string, string?, int?> showOsd,
-        TargetState targets, IMediaKeySender? media = null, IAppAudio? appAudio = null)
+        TargetState targets, IMediaKeySender? media = null, IAppAudio? appAudio = null,
+        Action<OsdMessage>? richOsd = null)
     {
         _config = config;
         _targets = targets;
-        _executor = new HotkeyActionExecutor(() => _config.Snapshot, wl, showOsd, media, targets, appAudio);
+        _executor = new HotkeyActionExecutor(() => _config.Snapshot, wl, showOsd, media, targets, appAudio, richOsd);
         _bindings = EffectiveBindings.Build(config.Snapshot).Bindings;
     }
 
@@ -136,6 +155,8 @@ public sealed class HotkeyEngine
             now - state.DoubleWindowStart < cfg.DoublePressMs)
         {
             CancelTimers(state);
+            state.Pending?.Cancel(); // the first tap was half of this double
+            state.Pending = null;
             state.DoubleWindowStart = 0;    // a third quick press starts over, not another double
             state.ConsumedByDouble = true;  // and this press's release isn't a tap
             Execute(binding.DoublePressAction, key, state);
@@ -194,24 +215,27 @@ public sealed class HotkeyEngine
         // A tap opens a double-press window; a hold doesn't (holding then
         // quickly pressing again isn't a double press).
         state.DoubleWindowStart = state.IsHeld ? 0 : now;
-        long token = ++state.TapToken;
 
         if (!state.IsHeld && binding.NormalAction is not null &&
             (binding.DoublePressAction is not null || binding.HoldAction is not null))
         {
             if (binding.DoublePressAction is not null)
             {
-                // Wait out the double-press window. A second press inside it
-                // closes the window (DoubleWindowStart = 0), cancelling this tap;
-                // a later tap bumps the token, superseding it.
+                // Wait out the double-press window; a second press inside it
+                // turns this into a double and cancels the tap.
                 int wait = _config.Snapshot.DoublePressMs;
                 var normal = binding.NormalAction;
-                _ = new Timer(_ =>
+                var pending = new PendingTap();
+                state.Pending = pending;
+                pending.Timer = new Timer(_ =>
                 {
                     lock (_lock)
                     {
-                        if (_states.TryGetValue(key, out var s) && s.TapToken == token && s.DoubleWindowStart != 0)
-                            Execute(normal, key, s);
+                        if (pending.Cancelled) return;
+                        pending.Timer?.Dispose();
+                        pending.Timer = null;
+                        if (state.Pending == pending) state.Pending = null;
+                        Execute(normal, key, state);
                     }
                 }, null, wait, Timeout.Infinite);
             }

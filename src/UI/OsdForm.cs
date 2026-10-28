@@ -68,13 +68,17 @@ public sealed class OsdForm : Form
     }
 
     /// <summary>Show (or refresh) the toast. Must be called on the UI thread.</summary>
-    public void ShowToast(string title, string? textValue, int? sliderPercent)
+    public void ShowToast(string title, string? textValue, int? sliderPercent) =>
+        ShowToast(new OsdMessage(title, textValue, sliderPercent));
+
+    /// <summary>Show (or refresh) the toast, with the app's icon if it names one. UI thread.</summary>
+    public void ShowToast(OsdMessage message)
     {
         _holdMs = Math.Max(250, _config.Snapshot.OsdDurationMs);
 
         (Point anchor, float scale) = ComputePlacement();
         _anchor = anchor;
-        RenderBitmap(title, textValue, sliderPercent, scale);
+        RenderBitmap(message, IconFor(message), scale);
 
         bool alreadyVisible = _phase is Phase.In or Phase.Hold;
         _phaseStart = Environment.TickCount64;
@@ -182,19 +186,34 @@ public sealed class OsdForm : Form
 
     // ─── Rendering ──────────────────────────────────────────────────────────────
 
-    private void RenderBitmap(string title, string? textValue, int? sliderPercent, float s)
+    private void RenderBitmap(OsdMessage message, Bitmap? icon, float s)
     {
         FreeBitmap();
 
-        using var bmp = new Bitmap(_windowSize.Width, _windowSize.Height,
-            System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+        using var bmp = RenderToast(message, icon, _windowSize, s);
+
+        // Select the ARGB bitmap into a memory DC for UpdateLayeredWindow.
+        nint screenDc = GetDC(0);
+        _memDc = CreateCompatibleDC(screenDc);
+        ReleaseDC(0, screenDc);
+        _hBitmap = bmp.GetHbitmap(Color.FromArgb(0)); // preserves per-pixel alpha
+        _oldBitmap = SelectObject(_memDc, _hBitmap);
+    }
+
+    /// <summary>The toast image on a transparent background. Static so it can be previewed.</summary>
+    internal static Bitmap RenderToast(OsdMessage message, Bitmap? icon, Size windowSize, float s)
+    {
+        string title = message.Title;
+        string? textValue = message.Text;
+        int? sliderPercent = message.Slider;
+        var bmp = new Bitmap(windowSize.Width, windowSize.Height, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
         using (var g = Graphics.FromImage(bmp))
         {
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
 
             int m = (int)(ToastMargin * s);
-            var toast = new Rectangle(m, m, _windowSize.Width - 2 * m, _windowSize.Height - 2 * m);
+            var toast = new Rectangle(m, m, windowSize.Width - 2 * m, windowSize.Height - 2 * m);
             float radius = 8 * s;
 
             using (var path = RoundedRect(toast, radius))
@@ -214,8 +233,29 @@ public sealed class OsdForm : Form
             using var valueFont = new Font("Segoe UI", 18 * s, FontStyle.Regular, GraphicsUnit.Pixel);
             using var white = new SolidBrush(Color.White);
 
-            var titleRect = new RectangleF(contentX, toast.Y + padY, contentW, 20 * s);
             using var fmt = new StringFormat { Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap };
+
+            // Title line: [emoji] [app icon] text. A leading emoji is drawn on its
+            // own with the emoji font: GDI+ doesn't fall back to another font for
+            // glyphs Segoe UI lacks, so mixed in it would render as a box.
+            float titleX = contentX;
+            float titleY = toast.Y + padY;
+            if (title.Length >= 2 && char.IsSurrogatePair(title, 0))
+            {
+                string emoji = title[..2];
+                title = title[2..].TrimStart();
+                using var emojiFont = new Font("Segoe UI Emoji", 17 * s, FontStyle.Regular, GraphicsUnit.Pixel);
+                g.DrawString(emoji, emojiFont, white, new PointF(titleX - 3 * s, titleY - 4 * s));
+                titleX += 26 * s;
+            }
+            if (icon is not null)
+            {
+                float size = 18 * s;
+                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                g.DrawImage(icon, new RectangleF(titleX, titleY + 1 * s, size, size));
+                titleX += size + 6 * s;
+            }
+            var titleRect = new RectangleF(titleX, titleY, contentX + contentW - titleX, 20 * s);
             g.DrawString(title, titleFont, white, titleRect, fmt);
 
             float contentY = toast.Y + padY + 26 * s;
@@ -243,13 +283,52 @@ public sealed class OsdForm : Form
                 g.DrawString(textValue, valueFont, white, valueRect, fmt);
             }
         }
+        return bmp;
+    }
 
-        // Select the ARGB bitmap into a memory DC for UpdateLayeredWindow.
-        nint screenDc = GetDC(0);
-        _memDc = CreateCompatibleDC(screenDc);
-        ReleaseDC(0, screenDc);
-        _hBitmap = bmp.GetHbitmap(Color.FromArgb(0)); // preserves per-pixel alpha
-        _oldBitmap = SelectObject(_memDc, _hBitmap);
+    // ─── App icons ──────────────────────────────────────────────────────────────
+
+    private static readonly Dictionary<string, Bitmap?> IconCache = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The icon for a message: an explicit exe, or the foreground app's when it's
+    /// the app the message names. Wave Link reports the focused app by name only,
+    /// so the icon comes from the foreground window, checked against that name in
+    /// case the two disagree for a moment.
+    /// </summary>
+    private static Bitmap? IconFor(OsdMessage message)
+    {
+        string? path = message.IconPath;
+        if (path is null && message.IconForApp is string app && AppAudio.Foreground() is { } fg && SameApp(app, fg))
+            path = fg.ExePath;
+        return LoadIcon(path);
+    }
+
+    private static bool SameApp(string name, ForegroundAppInfo fg)
+    {
+        static bool Related(string a, string? b) =>
+            !string.IsNullOrWhiteSpace(b) &&
+            (a.Contains(b, StringComparison.OrdinalIgnoreCase) || b.Contains(a, StringComparison.OrdinalIgnoreCase));
+        return Related(name, fg.Name) || Related(name, fg.ProcessName);
+    }
+
+    internal static Bitmap? LoadIcon(string? path)
+    {
+        if (string.IsNullOrEmpty(path)) return null;
+        lock (IconCache)
+        {
+            if (IconCache.TryGetValue(path, out var cached)) return cached;
+            Bitmap? bitmap = null;
+            try
+            {
+                using var icon = Icon.ExtractAssociatedIcon(path);
+                bitmap = icon?.ToBitmap();
+            }
+            catch { }
+            if (IconCache.Count > 64) IconCache.Clear();
+            IconCache[path] = bitmap;
+            return bitmap;
+        }
     }
 
     private void FreeBitmap()

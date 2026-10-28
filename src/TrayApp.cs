@@ -38,7 +38,7 @@ public sealed class TrayApp : ApplicationContext
         _osd = new OsdForm(_store);
 
         _wl = new WaveLinkClient();
-        _engine = new HotkeyEngine(_store, _wl, ShowOsd, _targets);
+        _engine = new HotkeyEngine(_store, _wl, ShowOsd, _targets, richOsd: ShowOsdMessage);
         _hook = new KeyboardHook();
         _hook.KeyEvent += _engine.OnKey;
 
@@ -172,6 +172,16 @@ public sealed class TrayApp : ApplicationContext
         {
             if (_store.Snapshot.OsdEnabled)
                 _osd.ShowToast(title, textValue, sliderPercent);
+        });
+    }
+
+    /// <summary>OSD with an optional app icon. The icon is looked up here, on the UI thread.</summary>
+    private void ShowOsdMessage(OsdMessage message)
+    {
+        OnUi(() =>
+        {
+            if (_store.Snapshot.OsdEnabled)
+                _osd.ShowToast(message);
         });
     }
 

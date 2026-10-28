@@ -38,12 +38,11 @@ public sealed class ConfigForm : Form
     // hold all of them; see EncodeTarget / DecodeTarget.
     private const string ActiveItem = "@active";
     private const string FocusedItem = "@focused";
+    private const string AppVolumeItem = "@appvolume";
+    private const string SystemItem = "@system";
 
     private static readonly (string Value, string Label)[] VolumeKeyModes =
         { ("windows", "Windows default"), ("wavelink", "Control the Active Target") };
-    private static readonly (string Value, string Label)[] TargetModifierChoices =
-        { ("", "None"), ("ctrl", "Ctrl"), ("alt", "Alt"), ("shift", "Shift"), ("win", "Win") };
-
     public ConfigForm(ConfigStore store, WaveLinkClient wl, KeyboardHook hook,
         Action onConfigApplied, Action onReconnect, Action onRelaunchAdmin, Icon appIcon,
         TargetState? targets = null)
@@ -87,6 +86,7 @@ public sealed class ConfigForm : Form
             _wl.Ready -= OnWlChanged;
             _wl.Disconnected -= OnWlChanged;
             _targets.Changed -= OnTargetsChanged;
+            _hook.CancelChordRecording();
             _hook.CancelRecording();
         };
     }
@@ -704,7 +704,12 @@ public sealed class ConfigForm : Form
         };
         row.Controls.Add(ddKind);
 
-        var modes = ModesFor(kind);
+        string trigger = label == "Normal Press" ? "normal" : showHold ? "hold" : "double";
+        var modes = ModesFor(kind, trigger);
+        // A mode no longer offered on this trigger stays listed while it's the one
+        // selected, rather than silently changing what the key does.
+        if (modes.Length > 0 && modes.All(m => m.Mode != mode) && ModesFor(kind).FirstOrDefault(m => m.Mode == mode) is { Mode: not null } kept)
+            modes = [.. modes, kept];
         if (modes.Length > 0)
         {
             row.Controls.Add(SmallLabel("Mode", 325, L1));
@@ -777,7 +782,9 @@ public sealed class ConfigForm : Form
                 });
             dd.DropDownWidth = 320;
             _tips.SetToolTip(dd, "Active Target follows the active entry in Global Settings. "
-                + "Focused App's Channel follows whichever app has focus.");
+                + "Focused App's Channel is the Wave Link channel of whichever app has focus; "
+                + "Focused App's Volume is that app's own volume, as in the Windows Volume Mixer. "
+                + "Native Volume Controls is the default Windows playback device.");
             row.Controls.Add(dd);
             x += 195;
 
@@ -868,16 +875,6 @@ public sealed class ConfigForm : Form
             row.Controls.Add(SmallLabel("Move To Channel", x, L2));
             row.Controls.Add(TargetDropdown(channels, action.ChannelId, new Point(x, C2), id => { action.ChannelId = id; Apply(); }));
             row.Controls.Add(Hint("Routes the app Wave Link sees as focused.", x + 195, H2));
-        }
-        else if (kind == AppVolume)
-        {
-            int hintX = x;
-            if (mode is "up" or "down" or "set")
-            {
-                AddLevelBox(row, action, x, mode == "set");
-                hintX = x + 85;
-            }
-            row.Controls.Add(Hint("The focused app's own volume, like the Windows Volume Mixer.", hintX, H2));
         }
         else if (kind == SwitchOutput)
         {
@@ -1023,6 +1020,11 @@ public sealed class ConfigForm : Form
         var items = new List<ComboItem>();
         if (includeActive) items.Add(new(ActiveItem, "Active Target"));
         items.Add(new(FocusedItem, "Focused App's Channel"));
+        if (!channelsOnly)
+        {
+            items.Add(new(AppVolumeItem, "Focused App's Volume"));
+            items.Add(new(SystemItem, "Native Volume Controls"));
+        }
         items.AddRange(_wl.GetChannels().Select(c => new ComboItem("c|" + c.Id, c.Name)));
         if (!channelsOnly)
         {
@@ -1037,6 +1039,8 @@ public sealed class ConfigForm : Form
     {
         ScopeActive => ActiveItem,
         ScopeFocusedApp => FocusedItem,
+        ScopeAppVolume => AppVolumeItem,
+        ScopeSystem => SystemItem,
         ScopeMix => mixId is null ? null : "m|" + mixId,
         ScopeOutput => deviceId is null ? null : "o|" + deviceId,
         _ => channelId is null ? null : "c|" + channelId
@@ -1046,6 +1050,8 @@ public sealed class ConfigForm : Form
     {
         if (id == ActiveItem) return (ScopeActive, null);
         if (id == FocusedItem) return (ScopeFocusedApp, null);
+        if (id == AppVolumeItem) return (ScopeAppVolume, null);
+        if (id == SystemItem) return (ScopeSystem, null);
         if (id.StartsWith("m|", StringComparison.Ordinal)) return (ScopeMix, id[2..]);
         if (id.StartsWith("o|", StringComparison.Ordinal)) return (ScopeOutput, id[2..]);
         if (id.StartsWith("c|", StringComparison.Ordinal)) return (ScopeChannel, id[2..]);
@@ -1187,10 +1193,40 @@ public sealed class ConfigForm : Form
                 Apply();
             };
             panel.Controls.Add(cbPersist);
-            y += 28;
+            y += 30;
+
+            // Fallback for "Focused App's Channel" when the app isn't in any channel.
+            panel.Controls.Add(new Label { Text = "If the focused app isn't in a channel, use", Location = new Point(16, y + 4), AutoSize = true });
+            var fallbackItems = new List<ComboItem> { new("", "Nothing (show a message)") };
+            fallbackItems.AddRange(TargetItems(includeActive: false, channelsOnly: false).Where(item => item.Id != FocusedItem));
+            var fb = _store.Current.FocusedAppFallback;
+            var ddFallback = TargetDropdown(fallbackItems,
+                fb is null ? "" : EncodeTarget(ScopeOf(fb), fb.ChannelId, fb.MixId, fb.DeviceId), new Point(300, y), id =>
+                {
+                    if (string.IsNullOrEmpty(id))
+                    {
+                        _store.Current.FocusedAppFallback = null;
+                    }
+                    else
+                    {
+                        var (scope, value) = DecodeTarget(id);
+                        var entry = new TargetEntry();
+                        ApplyTarget(scope, value, sc => entry.Scope = sc == ScopeChannel ? null : sc,
+                            v => entry.ChannelId = v, () => entry.MixId, v => entry.MixId = v, v => entry.DeviceId = v);
+                        _store.Current.FocusedAppFallback = entry;
+                    }
+                    Apply();
+                });
+            ddFallback.Width = 230;
+            ddFallback.DropDownWidth = 320;
+            _tips.SetToolTip(ddFallback, "Used by \"Focused App's Channel\" when the focused app isn't routed to any "
+                + "Wave Link channel. Focused App's Volume adjusts that app in the Windows Volume Mixer instead.");
+            panel.Controls.Add(ddFallback);
+            y += 34;
 
             panel.Controls.Add(Hint("Hotkeys aimed at \"Active Target\", and the volume keys above, control the active entry. "
-                + "Switch it with a Change Target action, or hold an entry's modifier while pressing the hotkey.", 16, y));
+                + "Switch it with a Change Target action, or hold an entry's Hold keys to aim at it temporarily. "
+                + "Order sets Next / Previous and which Hold keys win when several match.", 16, y));
             y += 44;
 
             var targets = _store.Current.Targets;
@@ -1233,20 +1269,60 @@ public sealed class ConfigForm : Form
                     panel.Controls.Add(ddMix);
                 }
 
+                int index = i;
                 panel.Controls.Add(new Label { Text = "Hold", Location = new Point(412, y + 4), AutoSize = true, ForeColor = _t.Subtle });
-                var ddModifier = new NoWheelComboBox { Location = new Point(448, y), Width = 90, DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat };
-                foreach (var (_, modLabel) in TargetModifierChoices) ddModifier.Items.Add(modLabel);
-                ddModifier.SelectedIndex = Math.Max(0, Array.FindIndex(TargetModifierChoices, m => m.Value == (entry.Modifier ?? "")));
-                ddModifier.SelectedIndexChanged += (_, _) =>
+                string chordText = EffectiveBindings.DescribeChord(entry.HoldKeys);
+                var hold = new Button
                 {
-                    if (_updatingUi) return;
-                    string value = TargetModifierChoices[ddModifier.SelectedIndex].Value;
-                    entry.Modifier = value.Length == 0 ? null : value;
-                    Apply();
+                    Text = chordText,
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = _t.Card,
+                    ForeColor = _t.Text,
+                    TextAlign = ContentAlignment.MiddleLeft,
+                    Location = new Point(446, y - 1),
+                    Size = new Size(150, 26)
                 };
-                _tips.SetToolTip(ddModifier, "Hold this modifier with any \"Active Target\" hotkey (or a volume key above) "
-                    + "to aim it at this entry for that press. If two entries share a modifier, the first wins.");
-                panel.Controls.Add(ddModifier);
+                hold.FlatAppearance.BorderColor = _t.Border;
+                hold.Click += (_, _) =>
+                {
+                    hold.Text = "Press keys...";
+                    _hook.BeginChordRecording(keys =>
+                    {
+                        try
+                        {
+                            BeginInvoke(() =>
+                            {
+                                entry.HoldKeys = keys;
+                                Apply();
+                                RebuildFeaturesCard();
+                            });
+                        }
+                        catch { }
+                    });
+                };
+                _tips.SetToolTip(hold, chordText + ". A custom modifier: hold these keys while using an \"Active Target\" hotkey or a "
+                    + "volume key, and it aims at this entry for as long as they're held. Click, then press the keys "
+                    + "(e.g. Ctrl+Shift, or F13) and let go. Other keys used here stop typing on their own.");
+                panel.Controls.Add(hold);
+
+                var clear = SmallButton("✕", 600, y - 1, 26, () =>
+                {
+                    entry.HoldKeys = null;
+                    Apply();
+                    RebuildFeaturesCard();
+                });
+                clear.Enabled = entry.HoldKeys is { Count: > 0 };
+                _tips.SetToolTip(clear, "Clear the hold keys.");
+                panel.Controls.Add(clear);
+
+                var up = SmallButton("▲", 632, y - 1, 26, () => MoveTarget(index, -1));
+                up.Enabled = index > 0;
+                _tips.SetToolTip(up, "Move up");
+                panel.Controls.Add(up);
+                var down = SmallButton("▼", 660, y - 1, 26, () => MoveTarget(index, +1));
+                down.Enabled = index < targets.Count - 1;
+                _tips.SetToolTip(down, "Move down");
+                panel.Controls.Add(down);
 
                 var remove = new Button
                 {
@@ -1254,7 +1330,7 @@ public sealed class ConfigForm : Form
                     BackColor = _t.Danger,
                     ForeColor = Color.White,
                     FlatStyle = FlatStyle.Flat,
-                    Location = new Point(552, y - 1),
+                    Location = new Point(692, y - 1),
                     Size = new Size(80, 26)
                 };
                 remove.FlatAppearance.BorderSize = 0;
@@ -1321,6 +1397,35 @@ public sealed class ConfigForm : Form
         }
     }
 
+    private void MoveTarget(int index, int delta)
+    {
+        var targets = _store.Current.Targets;
+        int to = index + delta;
+        if (to < 0 || to >= targets.Count) return;
+        (targets[index], targets[to]) = (targets[to], targets[index]);
+        Apply();
+        RebuildFeaturesCard();
+        RebuildHotkeyList();
+    }
+
+    private Button SmallButton(string text, int x, int y, int width, Action onClick)
+    {
+        var b = new Button
+        {
+            Text = text,
+            FlatStyle = FlatStyle.Flat,
+            BackColor = _t.Card,
+            ForeColor = _t.Text,
+            Location = new Point(x, y),
+            Size = new Size(width, 26),
+            Font = new Font("Segoe UI", 8f),
+            Padding = Padding.Empty
+        };
+        b.FlatAppearance.BorderColor = _t.Border;
+        b.Click += (_, _) => onClick();
+        return b;
+    }
+
     private void OnTargetsChanged()
     {
         if (IsDisposed || !IsHandleCreated) return;
@@ -1338,6 +1443,8 @@ public sealed class ConfigForm : Form
     private string DescribeTarget(TargetEntry entry) => ScopeOf(entry) switch
     {
         ScopeFocusedApp => "Focused App's Channel",
+        ScopeAppVolume => "Focused App's Volume",
+        ScopeSystem => "Native Volume Controls",
         ScopeMix => $"Mix: {_wl.GetMixById(entry.MixId)?.Name ?? "(unavailable)"}",
         ScopeOutput => $"Output: {_wl.GetOutputDeviceById(entry.DeviceId)?.Name ?? "(unavailable)"}",
         _ => (_wl.GetChannelById(entry.ChannelId)?.Name ?? (entry.ChannelId is null ? "(no channel)" : "(unavailable)"))
