@@ -16,6 +16,7 @@ public sealed class TrayApp : ApplicationContext
     private readonly KeyboardHook _hook;
     private readonly WaveLinkClient _wl;
     private readonly HotkeyEngine _engine;
+    private readonly TargetState _targets = new();
     private readonly OsdForm _osd;
     private readonly NotifyIcon _tray;
     private readonly Icon _appIcon;
@@ -36,7 +37,7 @@ public sealed class TrayApp : ApplicationContext
         _osd = new OsdForm(_store);
 
         _wl = new WaveLinkClient();
-        _engine = new HotkeyEngine(_store, _wl, ShowOsd);
+        _engine = new HotkeyEngine(_store, _wl, ShowOsd, _targets);
         _hook = new KeyboardHook();
         _hook.KeyEvent += _engine.OnKey;
 
@@ -72,8 +73,18 @@ public sealed class TrayApp : ApplicationContext
         };
         _trayRetryTimer.Start();
 
-        _wl.Ready += () => OnUi(RebuildTrayMenu);
-        _wl.Disconnected += () => OnUi(RebuildTrayMenu);
+        // Global Features hand the native keys back to Windows whenever Wave Link
+        // is down, so flip that on the connection events themselves.
+        _wl.Ready += () =>
+        {
+            _hook.SetGlobalFeaturesActive(true);
+            OnUi(RebuildTrayMenu);
+        };
+        _wl.Disconnected += () =>
+        {
+            _hook.SetGlobalFeaturesActive(false);
+            OnUi(RebuildTrayMenu);
+        };
         _wl.ConnectionFailing += () => OnUi(() =>
         {
             _tray.BalloonTipIcon = ToolTipIcon.Warning;
@@ -145,7 +156,11 @@ public sealed class TrayApp : ApplicationContext
     private void ApplyConfig()
     {
         var c = _store.Snapshot;
-        _hook.SetMappedCombos(c.Hotkeys.Keys);
+        var effective = EffectiveBindings.Build(c);
+        _targets.Update(c.Targets);
+        _engine.SetBindings(effective.Bindings);
+        _hook.SetResolutionInfo(effective);
+        _hook.SetMappedCombos(effective.Mapped);
         _hook.SetEnabled(c.HotkeysEnabled);
         _engine.Enabled = c.HotkeysEnabled;
         // Note: autostart is deliberately NOT touched here — the Run entry changes
@@ -208,7 +223,8 @@ public sealed class TrayApp : ApplicationContext
             onConfigApplied: ApplyConfig,
             onReconnect: _wl.ManualReconnect,
             onRelaunchAdmin: RelaunchAsAdmin,
-            appIcon: _appIcon);
+            appIcon: _appIcon,
+            targets: _targets);
         _configForm.FormClosed += (_, _) => _configForm = null;
         _configForm.Show();
     }

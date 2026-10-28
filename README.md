@@ -15,12 +15,14 @@ Built by FairTech.
 | Keystroke handling | out-of-process helper over stdio | in-process low-level hook |
 
 ## Features
-- **Per-key trigger customization:** tap, hold (configurable duration), and double-press actions on any key or combo.
+- **Per-key trigger customization:** tap, hold (configurable duration), and double-press actions on any key or combo. Hold actions can repeat while the key is held, at a configurable interval.
 - **Left/right modifiers:** optionally bind `LSHIFT+H` and `RSHIFT+H` to different actions; hotkeys recorded without a side keep matching either.
 - **System-wide detection:** low-level OS keyboard hook - works regardless of app focus, bypassing Elgato's software limitations.
 - **Smart OS suppression:** mapped keys are swallowed, so binding your keyboard's Volume Mute to a Wave Link channel doesn't also mute Windows.
-- **Actions:** toggle mute, volume up/down (configurable step), set absolute volume, switch output device, cycle output devices. Channel actions can target **All Mixes** or one named mix.
-- **Media controls:** Play/Pause, Next, Previous, Stop and system volume up/down for your Windows default output device. Handled by Windows, so they work with any player and don't need Wave Link running.
+- **Actions:** Mute (toggle, mute or unmute), Volume (up, down or set a level), switch output device, cycle output devices, media keys, and Change Target. Channel actions can target **All Mixes**, one named mix, or the **Active Target**. Each action can show or hide the OSD on its own.
+- **Media controls:** Play/Pause, Next, Previous, Stop and system volume up/down/mute for your Windows default output device. Handled by Windows, so they work with any player and don't need Wave Link running.
+- **Active Target:** keep a list of channel + mix targets and switch which one your hotkeys control, by cycling, picking one, holding a hotkey, or holding a modifier.
+- **Global Features:** hand your keyboard's volume keys, track keys or play/pause key over to Wave Link without recording a hotkey for each. They fall back to Windows whenever Wave Link isn't connected.
 - **On-Screen Display:** frameless dark overlay with 9 anchor positions, shown on the monitor your cursor is on; text and volume-bar modes; configurable duration.
 - **Auto-reconnect:** finds Wave Link via its `ws-info.json` port file (with a 1884–1893 scan fallback) and retries forever with backoff - at boot, after sleep/wake, or if Wave Link restarts.
 - **Start with Windows**, **auto-elevate to Admin** (for hotkeys in elevated apps), single-instance, light/dark mode.
@@ -48,9 +50,35 @@ Click **Record New Hotkey**, press the key or combo you want, then enable and co
 
 Enable **Distinguish L/R Modifiers** in Global Settings to record new hotkeys with side-specific modifiers (`LSHIFT+H`, `RCTRL+RSHIFT+H`), so the left and right modifier keys can trigger different actions. Existing hotkeys are unaffected: a hotkey recorded as `SHIFT+H` still fires for either shift, and a side-specific hotkey takes precedence over the side-agnostic one when both are bound.
 
-Media actions (Play / Pause, Next, Previous, Stop, System Volume Up/Down) press the matching Windows media key, so they reach whichever app currently has media control and move the volume of your default output device. They work whether or not Wave Link is running, and they're safe to bind to the physical media keys themselves: WLHK ignores the keypresses it generates, so nothing loops.
+Each trigger picks an **Action** and, where it has one, a **Mode**: Mute can Toggle, Mute or Unmute (the last two always send that state, so other programs watching Wave Link can rely on them as on/off signals), and Volume can go Up, Down or Set Level. Untick **OSD** on any action to keep it silent.
+
+On a **Hold** trigger, volume steps, track skips and target cycling can be set to **Repeat** every so many milliseconds for as long as the key is held, so a held hotkey ramps the volume instead of needing to be tapped.
+
+### Active Target
+
+Under **Global Features**, build an **Active Target list** of channel + mix pairs (for example *Browser, All Mixes* and *Wave Mic, Stream Mix*). Then set any Mute or Volume action's Target Channel to **Active Target** and it controls whichever entry is active. Switch the active entry with a **Change Target** action:
+
+- **Next Target / Previous Target** step through the list.
+- **Select Target** jumps straight to one entry.
+- **Target While Held** aims at an entry only while that key is held, then switches back. Use it on a Hold trigger, or on a Normal Press with nothing else set.
+
+Each entry can also have a **Hold** modifier. Holding it while pressing an Active Target hotkey aims that one press at the entry: give *Wave Mic* the Shift modifier, and `SHIFT+F13` runs your `F13` volume hotkey against the mic. A hotkey you've actually recorded as `SHIFT+F13` always takes priority. The list starts on its first entry each time WLHK launches.
+
+### Global Features
+
+Rather than recording `VOLUME_UP`, `VOLUME_DOWN` and `VOLUME_MUTE` one at a time, **Global Features** can take over whole groups of native keys:
+
+- **Volume keys** control the Active Target, ramping on the keyboard's own key repeat like the native keys do.
+- **Track keys** (Next / Previous) switch the Active Target.
+- **Play / Pause** mutes the Active Target.
+
+They only take over while Wave Link is connected, so you never end up with volume keys that do nothing. A recorded hotkey for the same key keeps priority, and Global Features only fill in triggers it leaves empty. Target modifiers work here too, and a modifier that isn't assigned to a target falls through to Windows, so `CTRL+VOLUME_UP` still changes the Windows volume.
+
+Media actions (Play / Pause, Next, Previous, Stop, System Volume Up/Down/Mute) press the matching Windows media key, so they reach whichever app currently has media control and move the volume of your default output device. They work whether or not Wave Link is running, and they're safe to bind to the physical media keys themselves: WLHK ignores the keypresses it generates, so nothing loops.
 
 For channel actions, choose **All Mixes** to affect the channel everywhere, or select a named mix to affect only that mix. For example, configure Toggle Mute for **Microphone** in the **VC** mix to mute it only in VC while leaving its other mixes unchanged.
+
+> **Upgrading from 2.5:** 2.6 merges the old one-per-behavior actions (Toggle Mute, Volume Up, Volume Down, Set Volume, and the individual media actions) into Mute, Volume and Media Key with a Mode. Your config is converted on first launch and the original is kept as `config.json.pre-2.6.bak`, which is what to restore if you go back to 2.5.
 
 **Running as Administrator** is recommended if you use hotkeys while focused on elevated apps (Task Manager, some games). Enable "Auto-Elevate to Admin on Start" in Global Settings. The `--no-elevate` command-line flag skips auto-elevation for a single launch.
 

@@ -16,6 +16,9 @@ public static class Log
 
     public static string Path => _path ??= ResolvePath();
 
+    /// <summary>Test seam: send the log somewhere other than the real app log.</summary>
+    internal static void UseFile(string path) => _path = path;
+
     private static string ResolvePath()
     {
         try

@@ -9,7 +9,8 @@ public enum MediaKey
     PreviousTrack,
     Stop,
     VolumeUp,
-    VolumeDown
+    VolumeDown,
+    VolumeMute
 }
 
 /// <summary>Sends a media key to Windows. Abstracted so tests don't drive the real session.</summary>
@@ -40,6 +41,7 @@ public sealed class MediaKeySender : IMediaKeySender
     private const uint KEYEVENTF_KEYUP = 0x0002;
 
     // Virtual key codes (winuser.h)
+    private const byte VK_VOLUME_MUTE = 0xAD;
     private const byte VK_VOLUME_DOWN = 0xAE;
     private const byte VK_VOLUME_UP = 0xAF;
     private const byte VK_MEDIA_NEXT_TRACK = 0xB0;
@@ -63,6 +65,7 @@ public sealed class MediaKeySender : IMediaKeySender
             MediaKey.Stop => VK_MEDIA_STOP,
             MediaKey.VolumeUp => VK_VOLUME_UP,
             MediaKey.VolumeDown => VK_VOLUME_DOWN,
+            MediaKey.VolumeMute => VK_VOLUME_MUTE,
             _ => 0
         };
         if (vk == 0) return;

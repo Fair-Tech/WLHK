@@ -20,6 +20,27 @@ public sealed class HotkeyAction
     public int? Step { get; set; }
     /// <summary>v2: absolute volume percent 0-100 (set_volume).</summary>
     public int? Value { get; set; }
+
+    /// <summary>
+    /// v2.6: sub-option of a consolidated action, e.g. "toggle"/"mute"/"unmute"
+    /// for mute, "up"/"down"/"set" for volume. See ActionCatalog.
+    /// </summary>
+    public string? Mode { get; set; }
+
+    /// <summary>v2.6: aim at the Active Target instead of ChannelId/MixId.</summary>
+    public bool? UseActiveTarget { get; set; }
+
+    /// <summary>v2.6: target entry for "select" and "hold" target actions.</summary>
+    public string? TargetId { get; set; }
+
+    /// <summary>v2.6: per-action OSD. Null or true shows it, false hides it.</summary>
+    public bool? Osd { get; set; }
+
+    /// <summary>v2.6: hold actions only. Keep re-running the action while held.</summary>
+    public bool? Repeat { get; set; }
+
+    /// <summary>v2.6: delay between repeats while held, in ms.</summary>
+    public int? RepeatIntervalMs { get; set; }
 }
 
 public sealed class HotkeyBinding
@@ -30,6 +51,38 @@ public sealed class HotkeyBinding
 
     [JsonIgnore]
     public bool IsEmpty => NormalAction is null && HoldAction is null && DoublePressAction is null;
+
+    /// <summary>
+    /// Runtime only: re-fire the normal action on the OS key-repeat stream. Set on
+    /// bindings synthesised by Global Features so a held volume key ramps the way
+    /// it does natively. Never persisted.
+    /// </summary>
+    [JsonIgnore]
+    public bool AutoRepeat { get; set; }
+}
+
+/// <summary>v2.6: take over native keys without recording hotkeys for them.</summary>
+public sealed class GlobalFeatures
+{
+    /// <summary>"windows" (default) or "wavelink": Vol+/Vol-/Mute drive the Active Target.</summary>
+    public string VolumeKeys { get; set; } = "windows";
+
+    /// <summary>"windows" (default) or "target": Next/Previous track switch the Active Target.</summary>
+    public string TrackKeys { get; set; } = "windows";
+
+    /// <summary>"windows" (default) or "mute": Play/Pause toggles mute on the Active Target.</summary>
+    public string PlayPauseKey { get; set; } = "windows";
+}
+
+/// <summary>v2.6: one entry in the Active Target list.</summary>
+public sealed class TargetEntry
+{
+    public string Id { get; set; } = "";
+    public string? ChannelId { get; set; }
+    /// <summary>Null means All Mixes.</summary>
+    public string? MixId { get; set; }
+    /// <summary>Optional "ctrl"/"alt"/"shift"/"win": hold it to aim at this target.</summary>
+    public string? Modifier { get; set; }
 }
 
 public sealed class AppConfig
@@ -52,6 +105,9 @@ public sealed class AppConfig
     /// Existing side-agnostic bindings keep matching either side.
     /// </summary>
     public bool DistinguishModifierSides { get; set; }
+
+    public GlobalFeatures GlobalFeatures { get; set; } = new();
+    public List<TargetEntry> Targets { get; set; } = new();
 }
 
 [JsonSourceGenerationOptions(
@@ -117,7 +173,18 @@ public sealed class ConfigStore
             {
                 var loaded = JsonSerializer.Deserialize(File.ReadAllText(ConfigPath), ConfigJsonContext.Default.AppConfig);
                 if (loaded is not null)
+                {
                     Current = Normalize(loaded);
+                    if (ActionCatalog.UpgradeAll(Current))
+                    {
+                        // Older versions can't read the consolidated action types, so
+                        // keep a copy of the original before rewriting it.
+                        string backup = ConfigPath + ".pre-2.6.bak";
+                        try { if (!File.Exists(backup)) File.Copy(ConfigPath, backup); } catch { }
+                        Save();
+                        Log.Write($"Config upgraded to 2.6 action types (backup: {backup})");
+                    }
+                }
             }
         }
         catch (Exception ex)
@@ -153,6 +220,11 @@ public sealed class ConfigStore
         c.OsdDurationMs = Math.Clamp(c.OsdDurationMs, 250, 15000);
         c.DoublePressMs = Math.Clamp(c.DoublePressMs, 100, 1000);
         if (string.IsNullOrEmpty(c.OsdPosition)) c.OsdPosition = "bottom-right";
+        c.GlobalFeatures ??= new GlobalFeatures();
+        c.Targets ??= new();
+        c.Targets.RemoveAll(t => t is null);
+        foreach (var t in c.Targets)
+            if (string.IsNullOrEmpty(t.Id)) t.Id = TargetState.NewId();
         return c;
     }
 

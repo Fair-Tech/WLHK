@@ -18,6 +18,7 @@ public sealed class ConfigForm : Form
     private readonly Action _onReconnect;
     private readonly Action _onRelaunchAdmin;
     private readonly Theme _t = Theme.Current();
+    private readonly TargetState _targets;
 
     private Panel _scroll = null!;
     private Panel _hotkeyList = null!;
@@ -32,29 +33,33 @@ public sealed class ConfigForm : Form
         public override string ToString() => Name;
     }
 
-    private static readonly (string Type, string Label)[] ActionTypes =
-    {
-        ("mute_channel", "Toggle Mute"),
-        ("volume_up_channel", "Volume Up"),
-        ("volume_down_channel", "Volume Down"),
-        ("set_volume", "Set Volume"),
-        ("switch_output", "Switch Output Device"),
-        ("cycle_output", "Cycle Output Devices"),
-        ("media_play_pause", "Media: Play / Pause"),
-        ("media_next", "Media: Next Track"),
-        ("media_previous", "Media: Previous Track"),
-        ("media_stop", "Media: Stop"),
-        ("media_volume_up", "System: Volume Up"),
-        ("media_volume_down", "System: Volume Down"),
-    };
+    /// <summary>Dropdown id standing in for "Active Target" in the channel list.</summary>
+    private const string ActiveTargetItemId = "\u0001active";
 
-    /// <summary>Action types that act on Windows and so need no Wave Link target.</summary>
-    private static bool IsMediaAction(string type) => type.StartsWith("media_", StringComparison.Ordinal);
+    private static readonly (string Value, string Label)[] VolumeKeyModes =
+        { ("windows", "Windows default"), ("wavelink", "Control the Active Target") };
+    private static readonly (string Value, string Label)[] TrackKeyModes =
+        { ("windows", "Windows default"), ("target", "Switch the Active Target") };
+    private static readonly (string Value, string Label)[] PlayPauseModes =
+        { ("windows", "Windows default"), ("mute", "Mute the Active Target") };
+    private static readonly (string Value, string Label)[] TargetModifierChoices =
+        { ("", "None"), ("ctrl", "Ctrl"), ("alt", "Alt"), ("shift", "Shift"), ("win", "Win") };
 
     public ConfigForm(ConfigStore store, WaveLinkClient wl, KeyboardHook hook,
-        Action onConfigApplied, Action onReconnect, Action onRelaunchAdmin, Icon appIcon)
+        Action onConfigApplied, Action onReconnect, Action onRelaunchAdmin, Icon appIcon,
+        TargetState? targets = null)
     {
         _store = store;
+        if (targets is null)
+        {
+            targets = new TargetState();
+            targets.Update(store.Current.Targets);
+        }
+        _targets = targets;
+
+        // Older action types are normally upgraded on load, but a config handed
+        // in directly (tests, or a hand-edited file) may still use them.
+        ActionCatalog.UpgradeAll(store.Current);
         _wl = wl;
         _hook = hook;
         _onConfigApplied = onConfigApplied;
@@ -63,8 +68,8 @@ public sealed class ConfigForm : Form
 
         Text = "Wave Link Hotkey Manager";
         Icon = appIcon;
-        ClientSize = new Size(860, 640);
-        MinimumSize = new Size(720, 480);
+        ClientSize = new Size(900, 720);
+        MinimumSize = new Size(800, 520);
         BackColor = _t.Bg;
         ForeColor = _t.Text;
         Font = new Font("Segoe UI", 9.5f);
@@ -76,11 +81,13 @@ public sealed class ConfigForm : Form
         _wl.StateChanged += OnWlChanged;
         _wl.Ready += OnWlChanged;
         _wl.Disconnected += OnWlChanged;
+        _targets.Changed += OnTargetsChanged;
         FormClosed += (_, _) =>
         {
             _wl.StateChanged -= OnWlChanged;
             _wl.Ready -= OnWlChanged;
             _wl.Disconnected -= OnWlChanged;
+            _targets.Changed -= OnTargetsChanged;
             _hook.CancelRecording();
         };
     }
@@ -117,6 +124,7 @@ public sealed class ConfigForm : Form
                     try
                     {
                         EnsureChannelTargetsInitialized();
+                        RebuildFeaturesCard();
                         RebuildHotkeyList();
                     }
                     finally { _updatingUi = false; }
@@ -172,6 +180,9 @@ public sealed class ConfigForm : Form
         AddTop(Spacer(8));
 
         AddTop(BuildGlobalCard());
+        AddTop(Spacer(12));
+
+        AddTop(BuildFeaturesCard());
         AddTop(Spacer(12));
 
         var recordBtn = PrimaryButton("+  Record New Hotkey", 44);
@@ -236,11 +247,13 @@ public sealed class ConfigForm : Form
             Text = "● Disconnected",
             ForeColor = _t.Danger,
             Font = new Font("Segoe UI Semibold", 9.5f),
-            AutoSize = true,
+            AutoSize = false,
+            Size = new Size(240, 22),
+            TextAlign = ContentAlignment.MiddleRight,
             Anchor = AnchorStyles.Top | AnchorStyles.Right
         };
         card.Controls.Add(_statusBadge);
-        card.Resize += (_, _) => _statusBadge.Location = new Point(card.Width - _statusBadge.Width - 16, 14);
+        card.Resize += (_, _) => _statusBadge.Location = new Point(card.Width - _statusBadge.Width - 16, 12);
 
         // Row 1: toggle checkboxes
         int y1 = 48;
@@ -267,7 +280,7 @@ public sealed class ConfigForm : Form
         // Row 2: OSD position, volume step, OSD duration, reconnect
         int labY = 84, ctlY = 102;
         card.Controls.Add(SmallLabel("OSD Position", 16, labY));
-        _ddOsdPos = new ComboBox { Location = new Point(16, ctlY), Width = 150, DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat };
+        _ddOsdPos = new NoWheelComboBox { Location = new Point(16, ctlY), Width = 150, DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat };
         foreach (var (val, label) in OsdPositions) _ddOsdPos.Items.Add(label);
         _ddOsdPos.SelectedIndexChanged += (_, _) =>
         {
@@ -489,6 +502,7 @@ public sealed class ConfigForm : Form
                      })
             {
                 changed |= InitializeDefaultChannelTarget(action, firstChannelId);
+                changed |= InitializeDefaultTargetId(action);
             }
         }
         return changed;
@@ -496,13 +510,58 @@ public sealed class ConfigForm : Form
 
     private static bool InitializeDefaultChannelTarget(HotkeyAction? action, string? firstChannelId)
     {
-        if (action is null || action.ChannelId is not null || firstChannelId is null ||
-            action.Type is not ("mute_channel" or "volume_up_channel" or
-                "volume_down_channel" or "set_volume"))
+        if (action is null || action.ChannelId is not null || action.UseActiveTarget == true ||
+            firstChannelId is null || !ActionCatalog.IsChannelKind(ActionCatalog.Resolve(action).Kind))
             return false;
 
         action.ChannelId = firstChannelId;
         return true;
+    }
+
+    /// <summary>Select / hold target actions start on the first list entry, same reasoning as channels.</summary>
+    private bool InitializeDefaultTargetId(HotkeyAction? action)
+    {
+        if (action is null || action.TargetId is not null) return false;
+        var (kind, mode) = ActionCatalog.Resolve(action);
+        if (kind != ActionCatalog.Target || mode is not ("select" or "hold")) return false;
+        string? first = _store.Current.Targets.FirstOrDefault()?.Id;
+        if (first is null) return false;
+        action.TargetId = first;
+        return true;
+    }
+
+    /// <summary>Switch an action to another kind, dropping fields that no longer apply.</summary>
+    private void ChangeKind(HotkeyAction action, string kind)
+    {
+        action.Type = kind;
+        action.Mode = ActionCatalog.ModesFor(kind).Length > 0 ? ActionCatalog.DefaultMode(kind) : null;
+        if (ActionCatalog.IsChannelKind(kind))
+        {
+            // Mute <-> Volume deliberately keeps its channel and mix.
+            action.DeviceId = null;
+            action.DeviceIds = null;
+            action.TargetId = null;
+            InitializeDefaultChannelTarget(action, _wl.GetChannels().FirstOrDefault()?.Id);
+        }
+        else
+        {
+            action.ChannelId = null;
+            action.MixId = null;
+            action.UseActiveTarget = null;
+            if (kind is not (ActionCatalog.SwitchOutput or ActionCatalog.CycleOutput))
+            {
+                action.DeviceId = null;
+                action.DeviceIds = null;
+            }
+            if (kind != ActionCatalog.Target)
+                action.TargetId = null;
+        }
+        if (!ActionCatalog.IsRepeatable(kind, action.Mode ?? ""))
+        {
+            action.Repeat = null;
+            action.RepeatIntervalMs = null;
+        }
+        InitializeDefaultTargetId(action);
     }
 
     private Panel BuildHotkeyCard(string combo, HotkeyBinding binding)
@@ -583,7 +642,9 @@ public sealed class ConfigForm : Form
         cb.CheckedChanged += (_, _) =>
         {
             if (_updatingUi) return;
-            HotkeyAction? newAction = cb.Checked ? new HotkeyAction { Type = "mute_channel" } : null;
+            HotkeyAction? newAction = cb.Checked
+                ? new HotkeyAction { Type = ActionCatalog.Mute, Mode = ActionCatalog.DefaultMode(ActionCatalog.Mute) }
+                : null;
             InitializeDefaultChannelTarget(newAction, _wl.GetChannels().FirstOrDefault()?.Id);
             setAction(newAction);
             Apply();
@@ -605,95 +666,127 @@ public sealed class ConfigForm : Form
         }
 
         int x = 145;
+        var (kind, mode) = ActionCatalog.Resolve(action!);
 
-        // Action type
+        // Row 1: what kind of action, its mode, and whether it shows the OSD.
         row.Controls.Add(SmallLabel("Action", x, 4));
-        var ddType = new ComboBox { Location = new Point(x, 20), Width = 190, DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat };
-        foreach (var (_, lbl2) in ActionTypes) ddType.Items.Add(lbl2);
-        ddType.SelectedIndex = Math.Max(0, Array.FindIndex(ActionTypes, a => a.Type == action!.Type));
-        ddType.SelectedIndexChanged += (_, _) =>
+        var ddKind = new NoWheelComboBox { Location = new Point(x, 20), Width = 170, DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat };
+        foreach (var (_, kindLabel) in ActionCatalog.Kinds) ddKind.Items.Add(kindLabel);
+        ddKind.SelectedIndex = Math.Max(0, Array.FindIndex(ActionCatalog.Kinds, k => k.Kind == kind));
+        ddKind.SelectedIndexChanged += (_, _) =>
         {
             if (_updatingUi) return;
-            action!.Type = ActionTypes[ddType.SelectedIndex].Type;
-            // Output actions cannot retain either half of a channel/mix target.
-            // Channel actions deliberately preserve both IDs when switching types.
-            if (IsMediaAction(action.Type))
-            {
-                // Windows media actions have no target at all.
-                action.ChannelId = null;
-                action.MixId = null;
-                action.DeviceId = null;
-                action.DeviceIds = null;
-            }
-            else if (action.Type is "switch_output" or "cycle_output")
-            {
-                action.ChannelId = null;
-                action.MixId = null;
-            }
-            else
-            {
-                action.DeviceId = null;
-                action.DeviceIds = null;
-                InitializeDefaultChannelTarget(action, _wl.GetChannels().FirstOrDefault()?.Id);
-            }
+            ChangeKind(action!, ActionCatalog.Kinds[ddKind.SelectedIndex].Kind);
             Apply();
             RebuildHotkeyList();
         };
-        row.Controls.Add(ddType);
-        // Targets
-        var channels = _wl.GetChannels().Select(c => new ComboItem(c.Id, c.Name)).ToList();
+        row.Controls.Add(ddKind);
+
+        var modes = ActionCatalog.ModesFor(kind);
+        if (modes.Length > 0)
+        {
+            row.Controls.Add(SmallLabel("Mode", 325, 4));
+            var ddMode = new NoWheelComboBox { Location = new Point(325, 20), Width = 150, DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat };
+            foreach (var (_, modeLabel) in modes) ddMode.Items.Add(modeLabel);
+            ddMode.SelectedIndex = Math.Max(0, Array.FindIndex(modes, m => m.Mode == mode));
+            ddMode.SelectedIndexChanged += (_, _) =>
+            {
+                if (_updatingUi) return;
+                action!.Type = kind;
+                action.Mode = modes[ddMode.SelectedIndex].Mode;
+                if (!ActionCatalog.IsRepeatable(kind, action.Mode))
+                {
+                    action.Repeat = null;
+                    action.RepeatIntervalMs = null;
+                }
+                InitializeDefaultTargetId(action);
+                Apply();
+                RebuildHotkeyList();
+            };
+            row.Controls.Add(ddMode);
+        }
+
+        var cbOsd = new CheckBox { Text = "OSD", Checked = action!.Osd != false, Location = new Point(490, 22), AutoSize = true };
+        _tips.SetToolTip(cbOsd, "Show the on-screen display when this action runs.");
+        cbOsd.CheckedChanged += (_, _) =>
+        {
+            if (_updatingUi) return;
+            action.Osd = cbOsd.Checked ? null : false;
+            Apply();
+        };
+        row.Controls.Add(cbOsd);
+
+        // Row 2: what the action applies to.
         var outputs = _wl.GetOutputDevices().Select(d => new ComboItem(d.Id, d.Name)).ToList();
 
-        if (action!.Type is "mute_channel" or "volume_up_channel" or "volume_down_channel" or "set_volume")
+        if (ActionCatalog.IsChannelKind(kind))
         {
+            bool useActive = action.UseActiveTarget == true;
+            var channels = new List<ComboItem> { new(ActiveTargetItemId, "Active Target") };
+            channels.AddRange(_wl.GetChannels().Select(c => new ComboItem(c.Id, c.Name)));
+
             row.Controls.Add(SmallLabel("Target Channel", x, 46));
-            var dd = TargetDropdown(channels, action.ChannelId, new Point(x, 62), id =>
+            var dd = TargetDropdown(channels, useActive ? ActiveTargetItemId : action.ChannelId, new Point(x, 62), id =>
             {
                 if (id is null) return;
-                action.ChannelId = id;
-                if (action.MixId is not null &&
-                    _wl.GetChannelById(id)?.Mixes.All(m => m.Id != action.MixId) != false)
+                if (id == ActiveTargetItemId)
+                {
+                    action.UseActiveTarget = true;
+                    action.ChannelId = null;
                     action.MixId = null;
+                }
+                else
+                {
+                    action.UseActiveTarget = null;
+                    action.ChannelId = id;
+                    if (action.MixId is not null &&
+                        _wl.GetChannelById(id)?.Mixes.All(m => m.Id != action.MixId) != false)
+                        action.MixId = null;
+                }
                 Apply();
                 RebuildHotkeyList();
             });
+            _tips.SetToolTip(dd, "\"Active Target\" follows whichever entry is active in Global Features.");
             row.Controls.Add(dd);
             x += 195;
 
-            var mixes = MixTargetChoices.Build(_wl.GetChannelById(action.ChannelId), _wl.GetMixes(), action.MixId)
-                .Select(m => new ComboItem(m.Id, m.Name)).ToList();
-            // Only "All Mixes" available: this channel belongs to no mix, so the
-            // dropdown would be a no-op choice.
-            if (mixes.Count > 1)
+            if (!useActive)
             {
-                row.Controls.Add(SmallLabel("Target Mix", x, 46));
-                var ddMix = TargetDropdown(mixes, action.MixId, new Point(x, 62), id => { action.MixId = id; Apply(); });
-                row.Controls.Add(ddMix);
-                x += 195;
+                var mixes = MixTargetChoices.Build(_wl.GetChannelById(action.ChannelId), _wl.GetMixes(), action.MixId)
+                    .Select(m => new ComboItem(m.Id, m.Name)).ToList();
+                // Only "All Mixes" available: this channel belongs to no mix, so the
+                // dropdown would be a no-op choice.
+                if (mixes.Count > 1)
+                {
+                    row.Controls.Add(SmallLabel("Target Mix", x, 46));
+                    var ddMix = TargetDropdown(mixes, action.MixId, new Point(x, 62), id => { action.MixId = id; Apply(); });
+                    row.Controls.Add(ddMix);
+                    x += 195;
+                }
             }
 
-            if (action.Type is "volume_up_channel" or "volume_down_channel")
-            {
-                row.Controls.Add(SmallLabel("Step (%)", x, 46));
-                var num = Numeric(x, 62, 1, 50, v => { action.Step = v; Apply(); }, width: 70);
-                num.Value = Math.Clamp(action.Step ?? _store.Current.VolumeStep, 1, 50);
-                row.Controls.Add(num);
-            }
-            else if (action.Type == "set_volume")
+            if (kind == ActionCatalog.Volume && mode == "set")
             {
                 row.Controls.Add(SmallLabel("Level (%)", x, 46));
                 var num = Numeric(x, 62, 0, 100, v => { action.Value = v; Apply(); }, width: 70);
                 num.Value = Math.Clamp(action.Value ?? 50, 0, 100);
                 row.Controls.Add(num);
             }
+            else if (kind == ActionCatalog.Volume)
+            {
+                row.Controls.Add(SmallLabel("Step (%)", x, 46));
+                var num = Numeric(x, 62, 1, 50, v => { action.Step = v; Apply(); }, width: 70);
+                num.Value = Math.Clamp(action.Step ?? _store.Current.VolumeStep, 1, 50);
+                row.Controls.Add(num);
+            }
         }
-        else if (action.Type == "switch_output")
+        else if (kind == ActionCatalog.SwitchOutput)
         {
             row.Controls.Add(SmallLabel("Target Output", x, 46));
             var dd = TargetDropdown(outputs, action.DeviceId, new Point(x, 62), id => { action.DeviceId = id; Apply(); });
             row.Controls.Add(dd);
         }
-        else if (action.Type == "cycle_output")
+        else if (kind == ActionCatalog.CycleOutput)
         {
             action.DeviceIds ??= new List<string>();
             while (action.DeviceIds.Count < 2)
@@ -716,18 +809,34 @@ public sealed class ConfigForm : Form
                 });
             row.Controls.Add(dd2);
         }
-        else if (IsMediaAction(action.Type))
+        else if (kind == ActionCatalog.Media)
         {
-            row.Controls.Add(new Label
+            row.Controls.Add(Hint(mode.StartsWith("volume_", StringComparison.Ordinal)
+                ? "Controls the Windows default output device."
+                : "Sent to whichever app currently has media control.", x, 50));
+        }
+        else if (kind == ActionCatalog.Target)
+        {
+            var entries = _store.Current.Targets;
+            if (entries.Count == 0)
             {
-                Text = action.Type is "media_volume_up" or "media_volume_down"
-                    ? "Controls the Windows default output device."
-                    : "Sent to whichever app currently has media control.",
-                Location = new Point(x, 50),
-                AutoSize = true,
-                ForeColor = _t.Subtle,
-                Font = new Font("Segoe UI", 9f, FontStyle.Italic)
-            });
+                row.Controls.Add(Hint("Add targets to the Active Target list under Global Features first.", x, 50));
+            }
+            else if (mode is "select" or "hold")
+            {
+                var items = entries.Select((e, i) => new ComboItem(e.Id, $"{i + 1}. {DescribeTarget(e)}")).ToList();
+                row.Controls.Add(SmallLabel("Target", x, 46));
+                var dd = TargetDropdown(items, action.TargetId, new Point(x, 62), id => { action.TargetId = id; Apply(); });
+                dd.Width = 300;
+                if (mode == "hold")
+                    _tips.SetToolTip(dd, "Aims at this target only while the key is held down. "
+                        + "Use it on Hold, or on a Normal Press with no other triggers set.");
+                row.Controls.Add(dd);
+            }
+            else
+            {
+                row.Controls.Add(Hint("Steps through the Active Target list under Global Features.", x, 50));
+            }
         }
 
         if (showHold)
@@ -741,6 +850,42 @@ public sealed class ConfigForm : Form
             holdLbl.Location = new Point(row.Width - holdNum.Width - 12, 6);
             row.Controls.Add(holdLbl);
             row.Controls.Add(holdNum);
+
+            if (ActionCatalog.IsRepeatable(kind, mode))
+            {
+                var interval = Numeric(0, 62, ActionCatalog.MinRepeatIntervalMs, ActionCatalog.MaxRepeatIntervalMs,
+                    v => { action.RepeatIntervalMs = v; Apply(); }, increment: 10, width: 80);
+                interval.Value = Math.Clamp(action.RepeatIntervalMs ?? ActionCatalog.DefaultRepeatIntervalMs,
+                    ActionCatalog.MinRepeatIntervalMs, ActionCatalog.MaxRepeatIntervalMs);
+                interval.Enabled = action.Repeat == true;
+                interval.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+                interval.Location = new Point(row.Width - interval.Width - 12, 62);
+                var intervalLbl = SmallLabel("Every (ms)", 0, 46);
+                intervalLbl.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+                intervalLbl.Location = new Point(row.Width - interval.Width - 12, 46);
+
+                var cbRepeat = new CheckBox
+                {
+                    Text = "Repeat",
+                    Checked = action.Repeat == true,
+                    AutoSize = false,
+                    Size = new Size(74, 22),
+                    Anchor = AnchorStyles.Top | AnchorStyles.Right,
+                    Location = new Point(row.Width - interval.Width - 12 - 84, 63)
+                };
+                _tips.SetToolTip(cbRepeat, "Keep repeating this action for as long as the key is held, "
+                    + "starting once the Hold Time is reached.");
+                cbRepeat.CheckedChanged += (_, _) =>
+                {
+                    if (_updatingUi) return;
+                    action.Repeat = cbRepeat.Checked ? true : null;
+                    interval.Enabled = cbRepeat.Checked;
+                    Apply();
+                };
+                row.Controls.Add(cbRepeat);
+                row.Controls.Add(intervalLbl);
+                row.Controls.Add(interval);
+            }
         }
 
         return row;
@@ -748,7 +893,7 @@ public sealed class ConfigForm : Form
 
     private ComboBox TargetDropdown(List<ComboItem> items, string? selectedId, Point loc, Action<string?> onChange)
     {
-        var dd = new ComboBox { Location = loc, Width = 180, DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat };
+        var dd = new NoWheelComboBox { Location = loc, Width = 180, DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat };
         foreach (var item in items) dd.Items.Add(item);
 
         int idx = items.FindIndex(i => i.Id == selectedId);
@@ -768,6 +913,207 @@ public sealed class ConfigForm : Form
         };
         return dd;
     }
+
+    // ─── Global Features ───────────────────────────────────────────────────────
+
+    private Panel _featuresCard = null!;
+    private Label? _activeTargetLabel;
+
+    private Panel BuildFeaturesCard()
+    {
+        _featuresCard = Card(200);
+        RebuildFeaturesCard();
+        return _featuresCard;
+    }
+
+    /// <summary>
+    /// Rebuilt whole whenever the target list or Wave Link's channels change, the
+    /// same way the hotkey cards are, so every dropdown always reflects reality.
+    /// </summary>
+    private void RebuildFeaturesCard()
+    {
+        var card = _featuresCard;
+        bool wasUpdatingUi = _updatingUi;
+        _updatingUi = true;
+        int y = 48;
+        card.SuspendLayout();
+        try
+        {
+            foreach (Control c in card.Controls.Cast<Control>().ToList())
+                c.Dispose();
+            card.Controls.Clear();
+
+            var gf = _store.Current.GlobalFeatures;
+            card.Controls.Add(new Label
+            {
+                Text = "Global Features",
+                ForeColor = _t.Primary,
+                Font = new Font("Segoe UI Semibold", 11.5f),
+                Location = new Point(16, 12),
+                AutoSize = true
+            });
+
+            AddFeatureRow("Volume keys (Vol+ / Vol- / Mute)", VolumeKeyModes, gf.VolumeKeys, v => gf.VolumeKeys = v);
+            AddFeatureRow("Track keys (Next / Previous)", TrackKeyModes, gf.TrackKeys, v => gf.TrackKeys = v);
+            AddFeatureRow("Play / Pause key", PlayPauseModes, gf.PlayPauseKey, v => gf.PlayPauseKey = v);
+            card.Controls.Add(Hint("These only take over while Wave Link is connected; otherwise the keys work as normal. "
+                + "A hotkey you've recorded for the same key takes priority.", 16, y + 2));
+            y += 42;
+
+            card.Controls.Add(new Label
+            {
+                Text = "Active Target list",
+                Font = new Font("Segoe UI Semibold", 9.5f),
+                Location = new Point(16, y),
+                AutoSize = true
+            });
+            _activeTargetLabel = new Label { Location = new Point(160, y + 1), AutoSize = true, ForeColor = _t.Primary };
+            card.Controls.Add(_activeTargetLabel);
+            UpdateActiveTargetLabel();
+            y += 24;
+            card.Controls.Add(Hint("Hotkeys aimed at \"Active Target\", and the keys above, control the active entry. "
+                + "Switch it with a Change Target action, or hold an entry's modifier while pressing the hotkey.", 16, y));
+            y += 42;
+
+            var targets = _store.Current.Targets;
+            var channelItems = _wl.GetChannels().Select(c => new ComboItem(c.Id, c.Name)).ToList();
+            for (int i = 0; i < targets.Count; i++)
+            {
+                var entry = targets[i];
+                card.Controls.Add(new Label { Text = $"{i + 1}.", Location = new Point(16, y + 4), AutoSize = true });
+
+                var ddChannel = TargetDropdown(channelItems, entry.ChannelId, new Point(40, y), id =>
+                {
+                    if (id is null) return;
+                    entry.ChannelId = id;
+                    if (entry.MixId is not null &&
+                        _wl.GetChannelById(id)?.Mixes.All(m => m.Id != entry.MixId) != false)
+                        entry.MixId = null;
+                    Apply();
+                    RebuildFeaturesCard();
+                    RebuildHotkeyList();
+                });
+                card.Controls.Add(ddChannel);
+
+                var mixItems = MixTargetChoices.Build(_wl.GetChannelById(entry.ChannelId), _wl.GetMixes(), entry.MixId)
+                    .Select(m => new ComboItem(m.Id, m.Name)).ToList();
+                var ddMix = TargetDropdown(mixItems, entry.MixId, new Point(230, y), id =>
+                {
+                    entry.MixId = id;
+                    Apply();
+                    RebuildHotkeyList();
+                });
+                ddMix.Width = 170;
+                ddMix.Enabled = mixItems.Count > 1;
+                card.Controls.Add(ddMix);
+
+                card.Controls.Add(new Label { Text = "Hold", Location = new Point(412, y + 4), AutoSize = true, ForeColor = _t.Subtle });
+                var ddModifier = new NoWheelComboBox { Location = new Point(448, y), Width = 90, DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat };
+                foreach (var (_, modLabel) in TargetModifierChoices) ddModifier.Items.Add(modLabel);
+                ddModifier.SelectedIndex = Math.Max(0, Array.FindIndex(TargetModifierChoices, m => m.Value == (entry.Modifier ?? "")));
+                ddModifier.SelectedIndexChanged += (_, _) =>
+                {
+                    if (_updatingUi) return;
+                    string value = TargetModifierChoices[ddModifier.SelectedIndex].Value;
+                    entry.Modifier = value.Length == 0 ? null : value;
+                    Apply();
+                };
+                _tips.SetToolTip(ddModifier, "Hold this modifier with any \"Active Target\" hotkey (or a volume key in "
+                    + "Global Features) to aim it at this entry for that press. If two entries share a modifier, the first wins.");
+                card.Controls.Add(ddModifier);
+
+                var remove = new Button
+                {
+                    Text = "Remove",
+                    BackColor = _t.Danger,
+                    ForeColor = Color.White,
+                    FlatStyle = FlatStyle.Flat,
+                    Location = new Point(552, y - 1),
+                    Size = new Size(80, 26)
+                };
+                remove.FlatAppearance.BorderSize = 0;
+                remove.Click += (_, _) =>
+                {
+                    _store.Current.Targets.Remove(entry);
+                    Apply();
+                    RebuildFeaturesCard();
+                    RebuildHotkeyList();
+                };
+                card.Controls.Add(remove);
+                y += 34;
+            }
+
+            var add = PrimaryButton("+  Add Target", 28);
+            add.Width = 130;
+            add.Location = new Point(16, y + 4);
+            add.Click += (_, _) =>
+            {
+                _store.Current.Targets.Add(new TargetEntry
+                {
+                    Id = TargetState.NewId(),
+                    ChannelId = _wl.GetChannels().FirstOrDefault()?.Id
+                });
+                Apply();
+                RebuildFeaturesCard();
+                RebuildHotkeyList();
+            };
+            card.Controls.Add(add);
+            card.Height = y + 48;
+        }
+        finally
+        {
+            card.ResumeLayout();
+            _updatingUi = wasUpdatingUi;
+        }
+
+        void AddFeatureRow(string text, (string Value, string Label)[] choices, string current, Action<string> set)
+        {
+            card.Controls.Add(new Label { Text = text, Location = new Point(16, y + 4), AutoSize = true });
+            var dd = new NoWheelComboBox { Location = new Point(250, y), Width = 230, DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat };
+            foreach (var (_, label) in choices) dd.Items.Add(label);
+            dd.SelectedIndex = Math.Max(0, Array.FindIndex(choices, c => c.Value == current));
+            dd.SelectedIndexChanged += (_, _) =>
+            {
+                if (_updatingUi) return;
+                set(choices[dd.SelectedIndex].Value);
+                Apply();
+            };
+            card.Controls.Add(dd);
+            y += 32;
+        }
+    }
+
+    private void OnTargetsChanged()
+    {
+        if (IsDisposed || !IsHandleCreated) return;
+        try { BeginInvoke(UpdateActiveTargetLabel); } catch { }
+    }
+
+    private void UpdateActiveTargetLabel()
+    {
+        if (_activeTargetLabel is null || _activeTargetLabel.IsDisposed) return;
+        var current = _targets.Current();
+        _activeTargetLabel.Text = current is null ? "(no targets yet)" : $"Active now: {DescribeTarget(current)}";
+    }
+
+    /// <summary>"Browser · All Mixes", tolerant of channels or mixes that have gone away.</summary>
+    private string DescribeTarget(TargetEntry entry)
+    {
+        string channel = _wl.GetChannelById(entry.ChannelId)?.Name
+                         ?? (entry.ChannelId is null ? "(no channel)" : "(unavailable)");
+        string mix = entry.MixId is null ? "All Mixes" : _wl.GetMixById(entry.MixId)?.Name ?? "(unavailable mix)";
+        return $"{channel} · {mix}";
+    }
+
+    private Label Hint(string text, int x, int y) => new()
+    {
+        Text = text,
+        Location = new Point(x, y),
+        AutoSize = true,
+        MaximumSize = new Size(720, 0),
+        ForeColor = _t.Subtle,
+        Font = new Font("Segoe UI", 9f, FontStyle.Italic)
+    };
 
     // ─── Small control factories ───────────────────────────────────────────────
 
@@ -812,7 +1158,7 @@ public sealed class ConfigForm : Form
 
     private NumericUpDown Numeric(int x, int y, int min, int max, Action<int> onChange, int increment = 1, int width = 90)
     {
-        var num = new NumericUpDown
+        var num = new NoWheelNumericUpDown
         {
             Location = new Point(x, y),
             Width = width,

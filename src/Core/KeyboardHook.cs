@@ -3,6 +3,12 @@ using System.Runtime.InteropServices;
 namespace Wlhk.Core;
 
 /// <summary>
+/// One key event handed to the engine. TargetOverrideId is set when a held
+/// target modifier picked an Active Target for this press.
+/// </summary>
+public readonly record struct KeyInput(string Combo, bool IsDown, bool IsRepeat, string? TargetOverrideId);
+
+/// <summary>
 /// Single persistent WH_KEYBOARD_LL hook on a dedicated high-priority thread.
 ///
 /// Design constraints:
@@ -59,11 +65,20 @@ public sealed class KeyboardHook : IDisposable
     }
 
     /// <summary>Raised on the hook thread for every non-modifier key event. Handlers must be fast.</summary>
-    public event Action<string, bool>? KeyEvent;
+    public event Action<KeyInput>? KeyEvent;
 
     // Lock-free published state, swapped whole on config changes.
     private HashSet<string> _suppressSet = new();
     private volatile bool _suppressionEnabled = true;
+
+    /// <summary>Target-modifier and Global Features data, published as one unit.</summary>
+    private sealed record ResolutionInfo(
+        IReadOnlySet<string> Dynamic,
+        IReadOnlySet<string> GlobalOnly,
+        IReadOnlyList<(ModifierFamily Family, string TargetId)> TargetModifiers);
+
+    private ResolutionInfo _info = new(new HashSet<string>(), new HashSet<string>(), []);
+    private volatile bool _globalFeaturesActive;
 
     // Recording mode: capture the next combo instead of dispatching it.
     private volatile Action<string>? _recordingCallback;
@@ -73,6 +88,7 @@ public sealed class KeyboardHook : IDisposable
 
     // Hook-thread-only state (no locking needed).
     private readonly Dictionary<uint, string> _activeCombos = new();
+    private readonly Dictionary<uint, string?> _activeOverrides = new();
     private bool _lCtrl, _rCtrl, _lAlt, _rAlt, _lShift, _rShift, _lWin, _rWin;
 
     private readonly HookProc _proc;   // field ref keeps the delegate alive for the native hook
@@ -105,6 +121,16 @@ public sealed class KeyboardHook : IDisposable
     }
 
     public void SetEnabled(bool enabled) => _suppressionEnabled = enabled;
+
+    /// <summary>Publish target modifiers and Global Features combos. Call on any config change.</summary>
+    public void SetResolutionInfo(EffectiveBindings bindings) =>
+        Volatile.Write(ref _info, new ResolutionInfo(bindings.Dynamic, bindings.GlobalOnly, bindings.TargetModifiers));
+
+    /// <summary>
+    /// Global Features only take over native keys while Wave Link is connected.
+    /// Otherwise the volume keys would do nothing at all, so they go back to Windows.
+    /// </summary>
+    public void SetGlobalFeaturesActive(bool active) => _globalFeaturesActive = active;
 
     /// <summary>
     /// Capture the next key combo instead of dispatching it. When
@@ -191,23 +217,49 @@ public sealed class KeyboardHook : IDisposable
         }
 
         string combo;
+        string? targetOverride;
+        bool isRepeat = false;
         if (isDown)
         {
-            combo = ResolveCombo(baseName);
-            _activeCombos[vk] = combo;
+            if (_activeCombos.TryGetValue(vk, out var held))
+            {
+                // OS key repeat: keep the combo and target of the original press,
+                // even if modifiers changed since.
+                combo = held;
+                _activeOverrides.TryGetValue(vk, out targetOverride);
+                isRepeat = true;
+            }
+            else
+            {
+                (combo, targetOverride) = ResolveWithTargets(baseName);
+                _activeCombos[vk] = combo;
+                _activeOverrides[vk] = targetOverride;
+            }
         }
         else
         {
             // Reuse the combo from the DOWN so modifier release order doesn't matter.
             if (_activeCombos.Remove(vk, out var stored))
+            {
                 combo = stored;
+                _activeOverrides.Remove(vk, out targetOverride);
+            }
             else
-                combo = ResolveCombo(baseName);
+            {
+                (combo, targetOverride) = ResolveWithTargets(baseName);
+            }
         }
 
-        KeyEvent?.Invoke(combo, isDown);
+        bool mapped = Volatile.Read(ref _suppressSet).Contains(combo);
 
-        if (_suppressionEnabled && Volatile.Read(ref _suppressSet).Contains(combo))
+        // A key mapped only by Global Features goes back to Windows, untouched and
+        // undispatched, while Wave Link is disconnected.
+        if (mapped && !_globalFeaturesActive && Volatile.Read(ref _info).GlobalOnly.Contains(combo))
+            return CallNextHookEx(_hook, nCode, wParam, lParam);
+
+        KeyEvent?.Invoke(new KeyInput(combo, isDown, isRepeat, targetOverride));
+
+        if (_suppressionEnabled && mapped)
             return 1; // swallow: block the OS default for mapped combos
 
         return CallNextHookEx(_hook, nCode, wParam, lParam);
@@ -250,23 +302,71 @@ public sealed class KeyboardHook : IDisposable
     /// form each held modifier is named by side (LCTRL/RCTRL/...), left before
     /// right when both are down.
     /// </summary>
-    private string BuildCombo(string baseName, bool sideSpecific)
+    private string BuildCombo(string baseName, bool sideSpecific) =>
+        ComposeCombo(baseName, sideSpecific, exclude: null);
+
+    /// <summary>
+    /// Resolve a press, then let a held target modifier redirect it. If the
+    /// combo as pressed isn't bound, but stripping a target modifier gives a combo
+    /// that has an Active Target action, the press runs that hotkey aimed at the
+    /// modifier's target: with Shift assigned to "Mic", SHIFT+F13 runs your F13
+    /// binding against Mic. A combo bound in its own right always wins, so this
+    /// never steals an existing SHIFT+F13 hotkey.
+    /// </summary>
+    internal (string Combo, string? TargetOverride) ResolveWithTargets(string baseName)
     {
-        bool ctrl = _lCtrl || _rCtrl, alt = _lAlt || _rAlt, shift = _lShift || _rShift, win = _lWin || _rWin;
+        string combo = ResolveCombo(baseName);
+        if (Volatile.Read(ref _suppressSet).Contains(combo))
+            return (combo, null);
+
+        var info = Volatile.Read(ref _info);
+        foreach (var (family, targetId) in info.TargetModifiers)
+        {
+            if (!IsHeld(family)) continue;
+            string specific = ComposeCombo(baseName, sideSpecific: true, exclude: family);
+            if (info.Dynamic.Contains(specific)) return (specific, targetId);
+            string generic = ComposeCombo(baseName, sideSpecific: false, exclude: family);
+            if (info.Dynamic.Contains(generic)) return (generic, targetId);
+        }
+        return (combo, null);
+    }
+
+    private bool IsHeld(ModifierFamily family) => family switch
+    {
+        ModifierFamily.Ctrl => _lCtrl || _rCtrl,
+        ModifierFamily.Alt => _lAlt || _rAlt,
+        ModifierFamily.Shift => _lShift || _rShift,
+        ModifierFamily.Win => _lWin || _rWin,
+        _ => false
+    };
+
+    private string ComposeCombo(string baseName, bool sideSpecific, ModifierFamily? exclude)
+    {
+        bool lCtrl = _lCtrl, rCtrl = _rCtrl, lAlt = _lAlt, rAlt = _rAlt;
+        bool lShift = _lShift, rShift = _rShift, lWin = _lWin, rWin = _rWin;
+        switch (exclude)
+        {
+            case ModifierFamily.Ctrl: lCtrl = rCtrl = false; break;
+            case ModifierFamily.Alt: lAlt = rAlt = false; break;
+            case ModifierFamily.Shift: lShift = rShift = false; break;
+            case ModifierFamily.Win: lWin = rWin = false; break;
+        }
+
+        bool ctrl = lCtrl || rCtrl, alt = lAlt || rAlt, shift = lShift || rShift, win = lWin || rWin;
         if (!ctrl && !alt && !shift && !win)
             return baseName;
 
         var sb = new System.Text.StringBuilder(48);
         if (sideSpecific)
         {
-            if (_lCtrl) sb.Append("LCTRL+");
-            if (_rCtrl) sb.Append("RCTRL+");
-            if (_lAlt) sb.Append("LALT+");
-            if (_rAlt) sb.Append("RALT+");
-            if (_lShift) sb.Append("LSHIFT+");
-            if (_rShift) sb.Append("RSHIFT+");
-            if (_lWin) sb.Append("LWIN+");
-            if (_rWin) sb.Append("RWIN+");
+            if (lCtrl) sb.Append("LCTRL+");
+            if (rCtrl) sb.Append("RCTRL+");
+            if (lAlt) sb.Append("LALT+");
+            if (rAlt) sb.Append("RALT+");
+            if (lShift) sb.Append("LSHIFT+");
+            if (rShift) sb.Append("RSHIFT+");
+            if (lWin) sb.Append("LWIN+");
+            if (rWin) sb.Append("RWIN+");
         }
         else
         {
