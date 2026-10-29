@@ -16,6 +16,8 @@ public sealed class TrayApp : ApplicationContext
     private readonly KeyboardHook _hook;
     private readonly WaveLinkClient _wl;
     private readonly HotkeyEngine _engine;
+    private readonly TargetState _targets = new();
+    private readonly System.Windows.Forms.Timer _persistTargetTimer = new() { Interval = 750 };
     private readonly OsdForm _osd;
     private readonly NotifyIcon _tray;
     private readonly Icon _appIcon;
@@ -36,7 +38,7 @@ public sealed class TrayApp : ApplicationContext
         _osd = new OsdForm(_store);
 
         _wl = new WaveLinkClient();
-        _engine = new HotkeyEngine(_store, _wl, ShowOsd);
+        _engine = new HotkeyEngine(_store, _wl, ShowOsd, _targets, richOsd: ShowOsdMessage);
         _hook = new KeyboardHook();
         _hook.KeyEvent += _engine.OnKey;
 
@@ -72,8 +74,18 @@ public sealed class TrayApp : ApplicationContext
         };
         _trayRetryTimer.Start();
 
-        _wl.Ready += () => OnUi(RebuildTrayMenu);
-        _wl.Disconnected += () => OnUi(RebuildTrayMenu);
+        // The Volume Keys setting hands the keys back to Windows whenever Wave Link
+        // is down, so flip that on the connection events themselves.
+        _wl.Ready += () =>
+        {
+            _hook.SetGlobalFeaturesActive(true);
+            OnUi(RebuildTrayMenu);
+        };
+        _wl.Disconnected += () =>
+        {
+            _hook.SetGlobalFeaturesActive(false);
+            OnUi(RebuildTrayMenu);
+        };
         _wl.ConnectionFailing += () => OnUi(() =>
         {
             _tray.BalloonTipIcon = ToolTipIcon.Warning;
@@ -99,11 +111,39 @@ public sealed class TrayApp : ApplicationContext
         waitThread.Start();
 
         ApplyConfig();
+
+        // Persistent Target: start on the saved entry, then save changes. Saves
+        // are debounced because a held "next target" key can step many times a
+        // second, and only where it settles is worth writing to disk.
+        if (_store.Snapshot.PersistentTarget && _store.Snapshot.ActiveTargetId is string saved)
+            _targets.Select(saved);
+        _persistTargetTimer.Tick += (_, _) =>
+        {
+            _persistTargetTimer.Stop();
+            PersistActiveTarget();
+        };
+        _targets.Changed += () => OnUi(() =>
+        {
+            if (!_store.Snapshot.PersistentTarget) return;
+            _persistTargetTimer.Stop();
+            _persistTargetTimer.Start();
+        });
+
         _hook.Start();
         _wl.Start();
     }
 
     private volatile bool _disposed;
+
+    /// <summary>Save the active target if Persistent Target is on and it changed. UI thread.</summary>
+    private void PersistActiveTarget()
+    {
+        if (!_store.Current.PersistentTarget) return;
+        string? active = _targets.ActiveId;
+        if (_store.Current.ActiveTargetId == active) return;
+        _store.Current.ActiveTargetId = active;
+        _store.Save();
+    }
 
     /// <summary>Force the shell to re-add our icon (no API exists to query whether it is present).</summary>
     private void ReassertTrayIcon()
@@ -135,6 +175,16 @@ public sealed class TrayApp : ApplicationContext
         });
     }
 
+    /// <summary>OSD with an optional app icon. The icon is looked up here, on the UI thread.</summary>
+    private void ShowOsdMessage(OsdMessage message)
+    {
+        OnUi(() =>
+        {
+            if (_store.Snapshot.OsdEnabled)
+                _osd.ShowToast(message);
+        });
+    }
+
     private void OnPowerModeChanged(object? sender, PowerModeChangedEventArgs e)
     {
         if (e.Mode == PowerModes.Resume)
@@ -145,7 +195,11 @@ public sealed class TrayApp : ApplicationContext
     private void ApplyConfig()
     {
         var c = _store.Snapshot;
-        _hook.SetMappedCombos(c.Hotkeys.Keys);
+        var effective = EffectiveBindings.Build(c);
+        _targets.Update(c.Targets);
+        _engine.SetBindings(effective.Bindings);
+        _hook.SetResolutionInfo(effective);
+        _hook.SetMappedCombos(effective.Mapped);
         _hook.SetEnabled(c.HotkeysEnabled);
         _engine.Enabled = c.HotkeysEnabled;
         // Note: autostart is deliberately NOT touched here — the Run entry changes
@@ -208,7 +262,8 @@ public sealed class TrayApp : ApplicationContext
             onConfigApplied: ApplyConfig,
             onReconnect: _wl.ManualReconnect,
             onRelaunchAdmin: RelaunchAsAdmin,
-            appIcon: _appIcon);
+            appIcon: _appIcon,
+            targets: _targets);
         _configForm.FormClosed += (_, _) => _configForm = null;
         _configForm.Show();
     }
@@ -228,6 +283,9 @@ public sealed class TrayApp : ApplicationContext
         SystemEvents.PowerModeChanged -= OnPowerModeChanged;
         _trayRetryTimer.Stop();
         _trayRetryTimer.Dispose();
+        _persistTargetTimer.Stop();
+        PersistActiveTarget(); // don't lose a change still waiting on the debounce
+        _persistTargetTimer.Dispose();
         _taskbarWatcher.Dispose();
         _tray.Visible = false;
         _tray.Dispose();

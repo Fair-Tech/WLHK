@@ -28,7 +28,7 @@ public sealed class HotkeyActionExecutorTests
         Assert.Equal(("mic", "vc", (double?)null, (bool?)true),
             Assert.Single(fake.PairWrites));
         Assert.False(fake.GetChannelById("mic")!.Mixes[1].IsMuted);
-        Assert.Equal(("Channel: Microphone · VC", "Muted", (int?)null),
+        Assert.Equal(("Microphone · VC", "Muted", (int?)null),
             Assert.Single(osd));
     }
 
