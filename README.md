@@ -23,7 +23,7 @@ Built by FairTech.
 - **Microphone:** hardware mute, gain up/down/set in dB, the Wave's Mic/PC monitor mix, and gain lock.
 - **Effects:** turn a channel's effects (noise gate, EQ, ...) on or off.
 - **Focused app:** control its Wave Link channel or its own Windows volume, move it to another channel, and fall back to a target of your choice when it isn't in any channel.
-- **OSD:** shows a speaker for raising, lowering or muting, and names the app, with its icon, when it acts on the focused app.
+- **OSD:** names the app, with its icon, when it acts on the focused app, with the channel on the right when it went through the app's channel.
 - **Media controls:** Play/Pause, Next, Previous, Stop and system volume up/down/mute for your Windows default output device. Handled by Windows, so they work with any player and don't need Wave Link running.
 - **Active Target:** keep an ordered list of targets and switch which one your hotkeys control, by cycling, picking one, holding a hotkey, or holding an entry's own custom modifier keys. Optionally remembered across restarts.
 - **Volume keys:** hand your keyboard's volume keys over to the Active Target without recording a hotkey for each. They fall back to Windows whenever Wave Link isn't connected.
@@ -68,9 +68,9 @@ In **Global Settings**, build an **Active Target list**. An entry can be a chann
 - **Select Target** jumps straight to one entry.
 - **Target While Held** aims at an entry only while the key is held, then switches back. It's offered on **Hold**, and on **Double Press**, where you double-tap and keep holding.
 
-Each entry can also have its own **Hold** keys: a custom modifier. Click **Hold**, press the keys you want (Ctrl+Shift, a spare key like F13, or a mix like Shift+Caps Lock) and let go. While they're held, every Active Target hotkey and volume key aims at that entry. Modifier keys are stripped from the hotkey, so with *Wave Mic* on Shift, `SHIFT+F13` runs your `F13` hotkey against the mic; a hotkey you've actually recorded as `SHIFT+F13` always takes priority. Ordinary keys used as Hold keys stop typing on their own. If several entries' keys are held, the one with the most keys wins, then the higher entry. The list starts on its first entry each time WLHK launches, unless **Persistent Target** is ticked, in which case it picks up where you left it.
+Each entry can also have its own **Hold** keys: a custom modifier. Click **Hold**, press the keys you want (Ctrl+Shift, a spare key like F13, or a mix like Shift+Caps Lock) and let go. Left and right modifiers are separate keys, so Left Shift and Right Shift can each aim at a different entry. While they're held, every Active Target hotkey and volume key aims at that entry. Modifier keys are stripped from the hotkey, so with *Wave Mic* on Shift, `SHIFT+F13` runs your `F13` hotkey against the mic; a hotkey you've actually recorded as `SHIFT+F13` always takes priority. Ordinary keys used as Hold keys stop typing on their own. If several entries' keys are held, the one with the most keys wins, then the higher entry. The list starts on its first entry each time WLHK launches, unless **Persistent Target** is ticked, in which case it picks up where you left it.
 
-**If the focused app isn't in a channel** picks what Focused App's Channel uses for apps Wave Link hasn't routed anywhere, for example Focused App's Volume. Left at Nothing, the OSD just says so.
+**If the focused app isn't in a channel** picks what Focused App's Channel uses for apps Wave Link hasn't routed anywhere, for example Focused App's Volume. **If the focused app has no audio** does the same for Focused App's Volume when the app isn't playing anything Windows can adjust (or nothing is focused), for example Native Volume Controls or a channel. Left at Nothing, the OSD just says so.
 
 ### Volume Keys
 

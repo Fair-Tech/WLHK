@@ -207,7 +207,7 @@ public sealed class ActiveTargetTests
         Assert.Equal(["F13"], effective.Dynamic.ToArray());
         var chord = Assert.Single(effective.TargetChords);
         Assert.Equal("b", chord.TargetId);
-        Assert.Equal([ModifierFamily.Shift], chord.Modifiers.ToArray());
+        Assert.Equal(["SHIFT"], chord.Modifiers.ToArray());
         Assert.Empty(chord.Keys);
     }
 

@@ -235,19 +235,10 @@ public sealed class OsdForm : Form
 
             using var fmt = new StringFormat { Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap };
 
-            // Title line: [emoji] [app icon] text. A leading emoji is drawn on its
-            // own with the emoji font: GDI+ doesn't fall back to another font for
-            // glyphs Segoe UI lacks, so mixed in it would render as a box.
+            // Title line: [app icon] title ............ right text
             float titleX = contentX;
             float titleY = toast.Y + padY;
-            if (title.Length >= 2 && char.IsSurrogatePair(title, 0))
-            {
-                string emoji = title[..2];
-                title = title[2..].TrimStart();
-                using var emojiFont = new Font("Segoe UI Emoji", 17 * s, FontStyle.Regular, GraphicsUnit.Pixel);
-                g.DrawString(emoji, emojiFont, white, new PointF(titleX - 3 * s, titleY - 4 * s));
-                titleX += 26 * s;
-            }
+            float titleEnd = contentX + contentW;
             if (icon is not null)
             {
                 float size = 18 * s;
@@ -255,7 +246,17 @@ public sealed class OsdForm : Form
                 g.DrawImage(icon, new RectangleF(titleX, titleY + 1 * s, size, size));
                 titleX += size + 6 * s;
             }
-            var titleRect = new RectangleF(titleX, titleY, contentX + contentW - titleX, 20 * s);
+            if (message.TitleRight is string right)
+            {
+                // The right side keeps its full width up to half the line; the title trims first.
+                float rightW = Math.Min(g.MeasureString(right, titleFont).Width + 2 * s,
+                    contentW / 2);
+                using var rightFmt = new StringFormat(fmt) { Alignment = StringAlignment.Far };
+                using var dim = new SolidBrush(Color.FromArgb(190, 255, 255, 255));
+                g.DrawString(right, titleFont, dim, new RectangleF(titleEnd - rightW, titleY, rightW, 20 * s), rightFmt);
+                titleEnd -= rightW + 12 * s;
+            }
+            var titleRect = new RectangleF(titleX, titleY, Math.Max(0, titleEnd - titleX), 20 * s);
             g.DrawString(title, titleFont, white, titleRect, fmt);
 
             float contentY = toast.Y + padY + 26 * s;

@@ -4,9 +4,11 @@ public enum ModifierFamily { Ctrl, Alt, Shift, Win }
 
 /// <summary>
 /// A target entry's custom modifier: every listed modifier and key must be held.
-/// Modifiers are matched by family (either Ctrl key counts as CTRL).
+/// Modifiers are named by side (LCTRL, RSHIFT) so left and right can aim at
+/// different entries. A side-agnostic name (CTRL), from configs recorded before
+/// sides were tracked, matches either key.
 /// </summary>
-public sealed record TargetChord(IReadOnlySet<ModifierFamily> Modifiers, IReadOnlySet<string> Keys, string TargetId)
+public sealed record TargetChord(IReadOnlySet<string> Modifiers, IReadOnlySet<string> Keys, string TargetId)
 {
     public int Size => Modifiers.Count + Keys.Count;
 }
@@ -85,15 +87,15 @@ public sealed class EffectiveBindings
                        ?? (ParseModifier(target.Modifier) is not null ? [target.Modifier!.ToUpperInvariant()] : null);
             if (keys is not { Count: > 0 }) continue;
 
-            var families = new HashSet<ModifierFamily>();
+            var modifiers = new HashSet<string>(StringComparer.Ordinal);
             var plain = new HashSet<string>(StringComparer.Ordinal);
             foreach (string key in keys)
             {
-                if (ParseModifier(key) is ModifierFamily family) families.Add(family);
+                if (ParseModifier(key) is not null) modifiers.Add(key.ToUpperInvariant());
                 else if (!string.IsNullOrWhiteSpace(key)) plain.Add(key);
             }
-            if (families.Count + plain.Count > 0)
-                chords.Add(new TargetChord(families, plain, target.Id));
+            if (modifiers.Count + plain.Count > 0)
+                chords.Add(new TargetChord(modifiers, plain, target.Id));
         }
         // Most specific first, so holding Ctrl+Shift picks a Ctrl+Shift entry over
         // a plain Shift one. OrderBy is stable, keeping list order among equals.
@@ -142,17 +144,26 @@ public sealed class EffectiveBindings
         _ => null
     };
 
-    /// <summary>"Ctrl + Shift", "F13", "Caps Lock + F13" for display.</summary>
+    /// <summary>"L Ctrl + R Shift", "F13", "Caps Lock + F13" for display.</summary>
     public static string DescribeChord(IReadOnlyList<string>? keys)
     {
         if (keys is not { Count: > 0 }) return "None";
-        return string.Join(" + ", keys.Select(k => ParseModifier(k) switch
+        return string.Join(" + ", keys.Select(k =>
         {
-            ModifierFamily.Ctrl => "Ctrl",
-            ModifierFamily.Alt => "Alt",
-            ModifierFamily.Shift => "Shift",
-            ModifierFamily.Win => "Win",
-            _ => TitleCase(k)
+            if (ParseModifier(k) is not ModifierFamily family) return TitleCase(k);
+            string name = family switch
+            {
+                ModifierFamily.Ctrl => "Ctrl",
+                ModifierFamily.Alt => "Alt",
+                ModifierFamily.Shift => "Shift",
+                _ => "Win"
+            };
+            return char.ToUpperInvariant(k[0]) switch
+            {
+                'L' => "L " + name,
+                'R' => "R " + name,
+                _ => name
+            };
         }));
     }
 

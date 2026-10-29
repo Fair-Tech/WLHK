@@ -160,7 +160,7 @@ public sealed class KeyboardHook : IDisposable
     /// <summary>
     /// Record a custom modifier for a target entry: every key pressed until the
     /// first one is released, e.g. Ctrl+Shift, F13, or Caps Lock+F13. Modifiers
-    /// are reported by family ("CTRL"), other keys by name ("F13").
+    /// are reported by side ("LCTRL"), other keys by name ("F13").
     /// </summary>
     public void BeginChordRecording(Action<List<string>> callback) => _chordCallback = callback;
 
@@ -211,8 +211,8 @@ public sealed class KeyboardHook : IDisposable
             {
                 // Modifiers are recorded but still reach Windows, so no key is left
                 // looking held. Releasing one ends the recording.
-                string family = ModifierFamilyName(vk);
-                if (isDown && !_chordRecorded.Contains(family)) _chordRecorded.Add(family);
+                string name = ModifierSideName(vk);
+                if (isDown && !_chordRecorded.Contains(name)) _chordRecorded.Add(name);
                 else if (isUp && _chordRecorded.Count > 0) FinishChord();
             }
             return CallNextHookEx(_hook, nCode, wParam, lParam);
@@ -407,9 +407,9 @@ public sealed class KeyboardHook : IDisposable
         if (callback is null) return;
 
         // Modifiers first in the usual order, then keys in the order pressed.
-        var families = new[] { "CTRL", "ALT", "SHIFT", "WIN" };
-        var keys = families.Where(_chordRecorded.Contains)
-            .Concat(_chordRecorded.Where(k => !families.Contains(k)))
+        var modifiers = new[] { "LCTRL", "RCTRL", "LALT", "RALT", "LSHIFT", "RSHIFT", "LWIN", "RWIN" };
+        var keys = modifiers.Where(_chordRecorded.Contains)
+            .Concat(_chordRecorded.Where(k => !modifiers.Contains(k)))
             .ToList();
         _chordRecorded.Clear();
 
@@ -421,33 +421,48 @@ public sealed class KeyboardHook : IDisposable
         if (keys.Count > 0) callback(keys);
     }
 
-    private static string ModifierFamilyName(uint vk) => vk switch
+    // Generic VKs (rare from the LL hook) count as the left key, as in TrackModifier.
+    private static string ModifierSideName(uint vk) => vk switch
     {
-        0xA2 or 0xA3 or 0x11 => "CTRL",
-        0xA4 or 0xA5 or 0x12 => "ALT",
-        0xA0 or 0xA1 or 0x10 => "SHIFT",
-        _ => "WIN"
+        0xA2 or 0x11 => "LCTRL",
+        0xA3 => "RCTRL",
+        0xA4 or 0x12 => "LALT",
+        0xA5 => "RALT",
+        0xA0 or 0x10 => "LSHIFT",
+        0xA1 => "RSHIFT",
+        0x5C => "RWIN",
+        _ => "LWIN"
     };
 
-    private bool IsHeld(ModifierFamily family) => family switch
+    /// <summary>LCTRL needs the left key, CTRL either.</summary>
+    private bool IsHeld(string modifier) => modifier switch
     {
-        ModifierFamily.Ctrl => _lCtrl || _rCtrl,
-        ModifierFamily.Alt => _lAlt || _rAlt,
-        ModifierFamily.Shift => _lShift || _rShift,
-        ModifierFamily.Win => _lWin || _rWin,
+        "LCTRL" => _lCtrl, "RCTRL" => _rCtrl, "CTRL" => _lCtrl || _rCtrl,
+        "LALT" => _lAlt, "RALT" => _rAlt, "ALT" => _lAlt || _rAlt,
+        "LSHIFT" => _lShift, "RSHIFT" => _rShift, "SHIFT" => _lShift || _rShift,
+        "LWIN" => _lWin, "RWIN" => _rWin, "WIN" => _lWin || _rWin,
         _ => false
     };
 
-    private string ComposeCombo(string baseName, bool sideSpecific, IReadOnlySet<ModifierFamily>? exclude)
+    /// <summary>
+    /// Builds the combo for the held modifiers, leaving out <paramref name="exclude"/>.
+    /// A sided name leaves out only that key, so with LSHIFT as a chord, holding
+    /// both Shifts still keeps the right one in the combo.
+    /// </summary>
+    private string ComposeCombo(string baseName, bool sideSpecific, IReadOnlySet<string>? exclude)
     {
         bool lCtrl = _lCtrl, rCtrl = _rCtrl, lAlt = _lAlt, rAlt = _rAlt;
         bool lShift = _lShift, rShift = _rShift, lWin = _lWin, rWin = _rWin;
         if (exclude is not null)
         {
-            if (exclude.Contains(ModifierFamily.Ctrl)) lCtrl = rCtrl = false;
-            if (exclude.Contains(ModifierFamily.Alt)) lAlt = rAlt = false;
-            if (exclude.Contains(ModifierFamily.Shift)) lShift = rShift = false;
-            if (exclude.Contains(ModifierFamily.Win)) lWin = rWin = false;
+            lCtrl &= !exclude.Contains("LCTRL") && !exclude.Contains("CTRL");
+            rCtrl &= !exclude.Contains("RCTRL") && !exclude.Contains("CTRL");
+            lAlt &= !exclude.Contains("LALT") && !exclude.Contains("ALT");
+            rAlt &= !exclude.Contains("RALT") && !exclude.Contains("ALT");
+            lShift &= !exclude.Contains("LSHIFT") && !exclude.Contains("SHIFT");
+            rShift &= !exclude.Contains("RSHIFT") && !exclude.Contains("SHIFT");
+            lWin &= !exclude.Contains("LWIN") && !exclude.Contains("WIN");
+            rWin &= !exclude.Contains("RWIN") && !exclude.Contains("WIN");
         }
 
         bool ctrl = lCtrl || rCtrl, alt = lAlt || rAlt, shift = lShift || rShift, win = lWin || rWin;

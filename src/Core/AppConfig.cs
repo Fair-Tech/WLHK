@@ -147,6 +147,12 @@ public sealed class AppConfig
     /// </summary>
     public TargetEntry? FocusedAppFallback { get; set; }
 
+    /// <summary>
+    /// What Focused App's Volume uses when the focused app has no audio to adjust
+    /// (or nothing is focused). Null shows a message instead.
+    /// </summary>
+    public TargetEntry? FocusedAppNoAudioFallback { get; set; }
+
     [JsonPropertyName("globalFeatures")]
     public LegacyGlobalFeatures? LegacyGlobalFeatures { get; set; }
 }

@@ -6,10 +6,17 @@ namespace Wlhk.Core;
 
 /// <summary>
 /// Result of a Windows volume change, for the OSD. ExePath lets the OSD show the
-/// app's icon; Previous (the level before) picks the up or down speaker emoji.
+/// app's icon; Previous is the level before the change.
 /// </summary>
 public readonly record struct AppVolumeResult(string AppName, int? Percent, bool? Muted, string? Problem,
-    string? ExePath = null, int? Previous = null);
+    string? ExePath = null, int? Previous = null)
+{
+    public const string NoAudio = "No audio from this app";
+    public const string NoFocusedApp = "No focused app";
+
+    /// <summary>Nothing focused is playing audio, so there was nothing to adjust.</summary>
+    public bool Silent => Problem is NoAudio or NoFocusedApp;
+}
 
 /// <summary>The app behind the foreground window.</summary>
 public readonly record struct ForegroundAppInfo(string Name, string? ProcessName, string? ExePath);
@@ -181,7 +188,7 @@ public sealed unsafe class AppAudio : IAppAudio, IDisposable
     private AppVolumeResult Apply(uint pid, string mode, int step, int value)
     {
         if (pid == 0)
-            return new AppVolumeResult("App Volume", null, null, "No focused app");
+            return new AppVolumeResult("App Volume", null, null, AppVolumeResult.NoFocusedApp);
 
         string? exe = ProcessName(pid);
         var (display, exePath) = Identity(pid, exe);
@@ -189,7 +196,7 @@ public sealed unsafe class AppAudio : IAppAudio, IDisposable
         try
         {
             if (sessions.Count == 0)
-                return new AppVolumeResult(display, null, null, "No audio from this app", exePath);
+                return new AppVolumeResult(display, null, null, AppVolumeResult.NoAudio, exePath);
 
             // Steps start from the loudest session, so one quiet stray session
             // can't make the whole app jump.

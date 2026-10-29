@@ -4,6 +4,8 @@ namespace Wlhk.UI;
 public sealed class Theme
 {
     public Color Bg, Text, Card, Border, Primary, PrimaryHover, Danger, Subtle;
+    // Fill of the system dropdowns, so buttons standing in for inputs match them.
+    public Color Input, InputHover, InputBorder;
     public Color BannerBg, BannerBorder, BannerText;
     public Color Connected = Color.FromArgb(16, 124, 16);
 
@@ -21,6 +23,9 @@ public sealed class Theme
                 PrimaryHover = Color.FromArgb(0, 106, 188),
                 Danger = Color.FromArgb(209, 52, 56),
                 Subtle = Color.FromArgb(160, 160, 160),
+                Input = Color.FromArgb(50, 50, 50),
+                InputHover = Color.FromArgb(62, 62, 62),
+                InputBorder = Color.FromArgb(50, 50, 50),
                 BannerBg = Color.FromArgb(59, 46, 0),
                 BannerBorder = Color.FromArgb(160, 120, 0),
                 BannerText = Color.FromArgb(255, 217, 102),
@@ -36,6 +41,9 @@ public sealed class Theme
                 PrimaryHover = Color.FromArgb(0, 106, 188),
                 Danger = Color.FromArgb(209, 52, 56),
                 Subtle = Color.FromArgb(110, 110, 110),
+                Input = Color.White,
+                InputHover = Color.FromArgb(229, 241, 251),
+                InputBorder = Color.FromArgb(204, 204, 204),
                 BannerBg = Color.FromArgb(255, 244, 206),
                 BannerBorder = Color.FromArgb(240, 192, 64),
                 BannerText = Color.FromArgb(93, 67, 0)

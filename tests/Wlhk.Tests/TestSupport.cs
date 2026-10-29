@@ -120,6 +120,9 @@ internal sealed class FakeAppAudio(AppVolumeResult reply) : IAppAudio
     /// <summary>Which Windows target each request went to: "app" or "system".</summary>
     public List<string> Scopes { get; } = [];
 
+    /// <summary>What the default device answers, when it should differ from the app.</summary>
+    public AppVolumeResult? SystemReply { get; init; }
+
     public void ApplyToFocusedApp(string mode, int step, int value, Action<AppVolumeResult> done)
     {
         Requests.Add((mode, step, value));
@@ -131,7 +134,7 @@ internal sealed class FakeAppAudio(AppVolumeResult reply) : IAppAudio
     {
         Requests.Add((mode, step, value));
         Scopes.Add("system");
-        done(reply);
+        done(SystemReply ?? reply);
     }
 }
 

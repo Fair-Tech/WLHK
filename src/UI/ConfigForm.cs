@@ -1195,34 +1195,15 @@ public sealed class ConfigForm : Form
             panel.Controls.Add(cbPersist);
             y += 30;
 
-            // Fallback for "Focused App's Channel" when the app isn't in any channel.
-            panel.Controls.Add(new Label { Text = "If the focused app isn't in a channel, use", Location = new Point(16, y + 4), AutoSize = true });
-            var fallbackItems = new List<ComboItem> { new("", "Nothing (show a message)") };
-            fallbackItems.AddRange(TargetItems(includeActive: false, channelsOnly: false).Where(item => item.Id != FocusedItem));
-            var fb = _store.Current.FocusedAppFallback;
-            var ddFallback = TargetDropdown(fallbackItems,
-                fb is null ? "" : EncodeTarget(ScopeOf(fb), fb.ChannelId, fb.MixId, fb.DeviceId), new Point(300, y), id =>
-                {
-                    if (string.IsNullOrEmpty(id))
-                    {
-                        _store.Current.FocusedAppFallback = null;
-                    }
-                    else
-                    {
-                        var (scope, value) = DecodeTarget(id);
-                        var entry = new TargetEntry();
-                        ApplyTarget(scope, value, sc => entry.Scope = sc == ScopeChannel ? null : sc,
-                            v => entry.ChannelId = v, () => entry.MixId, v => entry.MixId = v, v => entry.DeviceId = v);
-                        _store.Current.FocusedAppFallback = entry;
-                    }
-                    Apply();
-                });
-            ddFallback.Width = 230;
-            ddFallback.DropDownWidth = 320;
-            _tips.SetToolTip(ddFallback, "Used by \"Focused App's Channel\" when the focused app isn't routed to any "
+            // Fallbacks for the two focused-app targets when there's nothing to adjust.
+            AddFallback("If the focused app isn't in a channel, use", FocusedItem,
+                () => _store.Current.FocusedAppFallback, fb => _store.Current.FocusedAppFallback = fb,
+                "Used by \"Focused App's Channel\" when the focused app isn't routed to any "
                 + "Wave Link channel. Focused App's Volume adjusts that app in the Windows Volume Mixer instead.");
-            panel.Controls.Add(ddFallback);
-            y += 34;
+            AddFallback("If the focused app has no audio, use", AppVolumeItem,
+                () => _store.Current.FocusedAppNoAudioFallback, fb => _store.Current.FocusedAppNoAudioFallback = fb,
+                "Used by \"Focused App's Volume\" when the focused app isn't playing any audio Windows can adjust "
+                + "(the OSD would say \"No audio from this app\"), or nothing is focused.");
 
             panel.Controls.Add(Hint("Hotkeys aimed at \"Active Target\", and the volume keys above, control the active entry. "
                 + "Switch it with a Change Target action, or hold an entry's Hold keys to aim at it temporarily. "
@@ -1272,20 +1253,13 @@ public sealed class ConfigForm : Form
                 int index = i;
                 panel.Controls.Add(new Label { Text = "Hold", Location = new Point(412, y + 4), AutoSize = true, ForeColor = _t.Subtle });
                 string chordText = EffectiveBindings.DescribeChord(entry.HoldKeys);
-                var hold = new Button
-                {
-                    Text = chordText,
-                    FlatStyle = FlatStyle.Flat,
-                    BackColor = _t.Card,
-                    ForeColor = _t.Text,
-                    TextAlign = ContentAlignment.MiddleLeft,
-                    Location = new Point(446, y - 1),
-                    Size = new Size(150, 26)
-                };
-                hold.FlatAppearance.BorderColor = _t.Border;
+                var hold = InputButton(chordText, 446, y, 150);
+                hold.AlignLeft = true;
+                if (entry.HoldKeys is not { Count: > 0 }) hold.ForeColor = _t.Subtle;
                 hold.Click += (_, _) =>
                 {
                     hold.Text = "Press keys...";
+                    hold.ForeColor = _t.Primary;
                     _hook.BeginChordRecording(keys =>
                     {
                         try
@@ -1302,10 +1276,11 @@ public sealed class ConfigForm : Form
                 };
                 _tips.SetToolTip(hold, chordText + ". A custom modifier: hold these keys while using an \"Active Target\" hotkey or a "
                     + "volume key, and it aims at this entry for as long as they're held. Click, then press the keys "
-                    + "(e.g. Ctrl+Shift, or F13) and let go. Other keys used here stop typing on their own.");
+                    + "(e.g. Ctrl+Shift, or F13) and let go. Left and right modifiers count as different keys. "
+                    + "Other keys used here stop typing on their own.");
                 panel.Controls.Add(hold);
 
-                var clear = SmallButton("✕", 600, y - 1, 26, () =>
+                var clear = SmallButton("✕", 600, y, 26, () =>
                 {
                     entry.HoldKeys = null;
                     Apply();
@@ -1315,11 +1290,11 @@ public sealed class ConfigForm : Form
                 _tips.SetToolTip(clear, "Clear the hold keys.");
                 panel.Controls.Add(clear);
 
-                var up = SmallButton("▲", 632, y - 1, 26, () => MoveTarget(index, -1));
+                var up = SmallButton("▲", 632, y, 26, () => MoveTarget(index, -1));
                 up.Enabled = index > 0;
                 _tips.SetToolTip(up, "Move up");
                 panel.Controls.Add(up);
-                var down = SmallButton("▼", 660, y - 1, 26, () => MoveTarget(index, +1));
+                var down = SmallButton("▼", 660, y, 26, () => MoveTarget(index, +1));
                 down.Enabled = index < targets.Count - 1;
                 _tips.SetToolTip(down, "Move down");
                 panel.Controls.Add(down);
@@ -1371,6 +1346,37 @@ public sealed class ConfigForm : Form
             _updatingUi = wasUpdatingUi;
         }
 
+        void AddFallback(string label, string excludeItem, Func<TargetEntry?> get, Action<TargetEntry?> set, string tip)
+        {
+            panel.Controls.Add(new Label { Text = label, Location = new Point(16, y + 4), AutoSize = true });
+            var items = new List<ComboItem> { new("", "Nothing (show a message)") };
+            items.AddRange(TargetItems(includeActive: false, channelsOnly: false).Where(item => item.Id != excludeItem));
+            var current = get();
+            var dd = TargetDropdown(items,
+                current is null ? "" : EncodeTarget(ScopeOf(current), current.ChannelId, current.MixId, current.DeviceId),
+                new Point(300, y), id =>
+                {
+                    if (string.IsNullOrEmpty(id))
+                    {
+                        set(null);
+                    }
+                    else
+                    {
+                        var (scope, value) = DecodeTarget(id);
+                        var entry = new TargetEntry();
+                        ApplyTarget(scope, value, sc => entry.Scope = sc == ScopeChannel ? null : sc,
+                            v => entry.ChannelId = v, () => entry.MixId, v => entry.MixId = v, v => entry.DeviceId = v);
+                        set(entry);
+                    }
+                    Apply();
+                });
+            dd.Width = 230;
+            dd.DropDownWidth = 320;
+            _tips.SetToolTip(dd, tip);
+            panel.Controls.Add(dd);
+            y += 34;
+        }
+
         void AddDivider()
         {
             panel.Controls.Add(new Panel
@@ -1408,23 +1414,21 @@ public sealed class ConfigForm : Form
         RebuildHotkeyList();
     }
 
-    private Button SmallButton(string text, int x, int y, int width, Action onClick)
+    private InputButton SmallButton(string text, int x, int y, int width, Action onClick)
     {
-        var b = new Button
-        {
-            Text = text,
-            FlatStyle = FlatStyle.Flat,
-            BackColor = _t.Card,
-            ForeColor = _t.Text,
-            Location = new Point(x, y),
-            Size = new Size(width, 26),
-            Font = new Font("Segoe UI", 8f),
-            Padding = Padding.Empty
-        };
-        b.FlatAppearance.BorderColor = _t.Border;
+        var b = InputButton(text, x, y, width);
+        b.Font = new Font("Segoe UI", 8f);
         b.Click += (_, _) => onClick();
         return b;
     }
+
+    /// <summary>A box drawn like the dropdowns beside it, for controls that act as inputs.</summary>
+    private InputButton InputButton(string text, int x, int y, int width) => new(_t)
+    {
+        Text = text,
+        Location = new Point(x, y),
+        Size = new Size(width, 23)
+    };
 
     private void OnTargetsChanged()
     {
@@ -1439,7 +1443,7 @@ public sealed class ConfigForm : Form
         _activeTargetLabel.Text = current is null ? "(no targets yet)" : $"Active now: {DescribeTarget(current)}";
     }
 
-    /// <summary>"Browser · All Mixes", "Mix: Stream Mix", ... tolerant of things that have gone away.</summary>
+    /// <summary>"Browser", "Browser · Stream Mix", "Mix: Stream Mix", ... tolerant of things that have gone away.</summary>
     private string DescribeTarget(TargetEntry entry) => ScopeOf(entry) switch
     {
         ScopeFocusedApp => "Focused App's Channel",
@@ -1448,7 +1452,7 @@ public sealed class ConfigForm : Form
         ScopeMix => $"Mix: {_wl.GetMixById(entry.MixId)?.Name ?? "(unavailable)"}",
         ScopeOutput => $"Output: {_wl.GetOutputDeviceById(entry.DeviceId)?.Name ?? "(unavailable)"}",
         _ => (_wl.GetChannelById(entry.ChannelId)?.Name ?? (entry.ChannelId is null ? "(no channel)" : "(unavailable)"))
-             + " · " + (entry.MixId is null ? "All Mixes" : _wl.GetMixById(entry.MixId)?.Name ?? "(unavailable mix)")
+             + (entry.MixId is null ? "" : " · " + (_wl.GetMixById(entry.MixId)?.Name ?? "(unavailable mix)"))
     };
 
     private Label Hint(string text, int x, int y) => new()

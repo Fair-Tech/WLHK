@@ -7,13 +7,11 @@ using static Wlhk.Tests.Targets;
 namespace Wlhk.Tests;
 
 /// <summary>
-/// Windows volume targets, hold-key chords, the focused-app fallback, and what
-/// the OSD shows (speaker emoji, app names and icons). v2.6.
+/// Windows volume targets, hold-key chords, the focused-app fallbacks, and what
+/// the OSD shows (app names and icons). v2.6.
 /// </summary>
 public sealed class TargetsAndOsdTests
 {
-    private const string Up = "\U0001F50A", Down = "\U0001F509", Muted = "\U0001F507";
-
     // ─── Hold-key chords ────────────────────────────────────────────────────────
 
     [Fact]
@@ -43,6 +41,38 @@ public sealed class TargetsAndOsdTests
         Assert.Equal(("SHIFT+F13", null), hook.ResolveWithTargets("F13")); // Caps Lock not held yet
 
         HoldKey(hook, "CAPS LOCK");
+        Assert.Equal(("F13", "mic"), hook.ResolveWithTargets("F13"));
+    }
+
+    [Fact]
+    public void LeftAndRightModifiersAreSeparateChords()
+    {
+        var (hook, _) = Hook(volumeKeys: false, ("left", ["LSHIFT"]), ("right", ["RSHIFT"]));
+
+        HoldModifiers(hook, "_lShift");
+        Assert.Equal(("F13", "left"), hook.ResolveWithTargets("F13"));
+
+        // Both down: taking out either chord still leaves the other Shift, so neither applies.
+        HoldModifiers(hook, "_rShift");
+        Assert.Equal(("SHIFT+F13", null), hook.ResolveWithTargets("F13"));
+    }
+
+    [Fact]
+    public void ARightModifierChordIgnoresTheLeftKey()
+    {
+        var (hook, _) = Hook(volumeKeys: false, ("right", ["RCTRL"]));
+        HoldModifiers(hook, "_lCtrl");
+
+        Assert.Equal(("CTRL+F13", null), hook.ResolveWithTargets("F13"));
+    }
+
+    [Fact]
+    public void ASideAgnosticChordStillMatchesEitherSide()
+    {
+        // Chords recorded before sides were tracked.
+        var (hook, _) = Hook(volumeKeys: false, ("mic", ["SHIFT"]));
+        HoldModifiers(hook, "_rShift");
+
         Assert.Equal(("F13", "mic"), hook.ResolveWithTargets("F13"));
     }
 
@@ -99,6 +129,8 @@ public sealed class TargetsAndOsdTests
     [Theory]
     [InlineData(null, "None")]
     [InlineData(new[] { "CTRL", "SHIFT" }, "Ctrl + Shift")]
+    [InlineData(new[] { "LCTRL", "RSHIFT" }, "L Ctrl + R Shift")]
+    [InlineData(new[] { "RALT", "F13" }, "R Alt + F13")]
     [InlineData(new[] { "F13" }, "F13")]
     [InlineData(new[] { "SHIFT", "CAPS LOCK" }, "Shift + Caps Lock")]
     public void ChordsDescribeThemselves(string[]? keys, string expected) =>
@@ -116,7 +148,7 @@ public sealed class TargetsAndOsdTests
 
         Assert.Equal("system", Assert.Single(audio.Scopes));
         Assert.Equal(("down", 10), (audio.Requests[0].Mode, audio.Requests[0].Step));
-        Assert.Equal(new OsdMessage($"{Down} Speakers", null, 40), Assert.Single(osd));
+        Assert.Equal(new OsdMessage("Speakers", null, 40), Assert.Single(osd));
     }
 
     [Fact]
@@ -128,7 +160,7 @@ public sealed class TargetsAndOsdTests
         exec.Execute(new HotkeyAction { Type = "mute", Mode = "toggle", Scope = "app_volume" });
 
         Assert.Equal("toggle_mute", audio.Requests[0].Mode);
-        Assert.Equal(new OsdMessage($"{Muted} Spotify", "Muted", null, @"C:\Spotify\Spotify.exe"), Assert.Single(osd));
+        Assert.Equal(new OsdMessage("Spotify", "Muted", null, @"C:\Spotify\Spotify.exe"), Assert.Single(osd));
     }
 
     [Fact]
@@ -162,14 +194,14 @@ public sealed class TargetsAndOsdTests
     // ─── Focused app's channel and its fallback ─────────────────────────────────
 
     [Fact]
-    public void FocusedAppsChannelNamesTheChannelAndTheApp()
+    public void FocusedAppsChannelNamesTheAppWithTheChannelOnTheRight()
     {
         var (exec, wl, osd) = Executor();
         wl.Focused = new FocusedApp { Id = "Spotify", Name = "Spotify", ChannelId = "music" };
 
         exec.Execute(new HotkeyAction { Type = "volume", Mode = "up", Scope = "focused_app", Step = 10 });
 
-        Assert.Equal(new OsdMessage($"{Up} Music · Spotify", null, 60, IconForApp: "Spotify"), Assert.Single(osd));
+        Assert.Equal(new OsdMessage("Spotify", null, 60, IconForApp: "Spotify", TitleRight: "Music"), Assert.Single(osd));
     }
 
     [Theory]
@@ -211,28 +243,115 @@ public sealed class TargetsAndOsdTests
         Assert.Equal("Notepad isn't in a channel", Assert.Single(osd).Text);
     }
 
-    // ─── Speaker emoji ──────────────────────────────────────────────────────────
+    // ─── No-audio fallback ──────────────────────────────────────────────────────
 
-    [Theory]
-    [InlineData("up", null, Up, 60)]
-    [InlineData("down", null, Down, 40)]
-    [InlineData("set", 20, Down, 20)]
-    [InlineData("set", 90, Up, 90)]
-    public void VolumeTitlesUseTheSpeakerForTheDirection(string mode, int? value, string emoji, int level)
+    private static readonly AppVolumeResult Silent =
+        new("Notepad", null, null, AppVolumeResult.NoAudio, @"C:\Windows\notepad.exe");
+
+    [Fact]
+    public void NoAudioFallsBackToTheDefaultDevice()
     {
-        var (exec, _, osd) = Executor();
-        exec.Execute(new HotkeyAction { Type = "volume", Mode = mode, ChannelId = "music", Step = 10, Value = value });
-        Assert.Equal(new OsdMessage($"{emoji} Music", null, level), Assert.Single(osd));
+        var audio = new FakeAppAudio(Silent) { SystemReply = new AppVolumeResult("Speakers", 45, null, null, Previous: 50) };
+        var config = new AppConfig { FocusedAppNoAudioFallback = new TargetEntry { Scope = "system" } };
+        var (exec, _, osd) = Executor(audio, config: config, connected: false);
+
+        exec.Execute(new HotkeyAction { Type = "volume", Mode = "down", Scope = "app_volume", Step = 5 });
+
+        Assert.Equal(["app", "system"], audio.Scopes);
+        Assert.Equal(("down", 5), (audio.Requests[1].Mode, audio.Requests[1].Step));
+        Assert.Equal(new OsdMessage("Speakers", null, 45), Assert.Single(osd)); // no "No audio" toast first
+    }
+
+    [Fact]
+    public void NoAudioFallsBackToAChannelKeepingTheMode()
+    {
+        var config = new AppConfig { FocusedAppNoAudioFallback = new TargetEntry { ChannelId = "music" } };
+        var (exec, wl, _) = Executor(new FakeAppAudio(Silent), config: config);
+
+        exec.Execute(new HotkeyAction { Type = "mute", Mode = "toggle", Scope = "app_volume" });
+
+        Assert.True(Assert.Single(wl.ChannelWrites).Muted);
+    }
+
+    [Fact]
+    public void NoAudioFallbackAlsoCoversTheChannelFallback()
+    {
+        // Not in a channel -> Focused App's Volume -> no audio -> Music.
+        var config = new AppConfig
+        {
+            FocusedAppFallback = new TargetEntry { Scope = "app_volume" },
+            FocusedAppNoAudioFallback = new TargetEntry { ChannelId = "music" }
+        };
+        var (exec, wl, _) = Executor(new FakeAppAudio(Silent), config: config);
+        wl.Focused = new FocusedApp { Id = "Notepad", Name = "Notepad", ChannelId = null };
+
+        exec.Execute(new HotkeyAction { Type = "volume", Mode = "up", Scope = "focused_app" });
+
+        Assert.Equal("music", Assert.Single(wl.ChannelWrites).Id);
+    }
+
+    [Fact]
+    public void NoAudioFallbackToTheFocusedAppsChannelDoesntLoop()
+    {
+        // The two fallbacks point at each other; the second one gives up with a message.
+        var audio = new FakeAppAudio(Silent);
+        var config = new AppConfig
+        {
+            FocusedAppFallback = new TargetEntry { Scope = "app_volume" },
+            FocusedAppNoAudioFallback = new TargetEntry { Scope = "focused_app" }
+        };
+        var (exec, wl, osd) = Executor(audio, config: config);
+        wl.Focused = new FocusedApp { Id = "Notepad", Name = "Notepad", ChannelId = null };
+
+        exec.Execute(new HotkeyAction { Type = "volume", Mode = "up", Scope = "app_volume" });
+
+        Assert.Equal(["app"], audio.Scopes);
+        Assert.Equal("Notepad isn't in a channel", Assert.Single(osd).Text);
+    }
+
+    [Fact]
+    public void WithoutANoAudioFallbackItStillSaysSo()
+    {
+        var (exec, _, osd) = Executor(new FakeAppAudio(Silent));
+
+        exec.Execute(new HotkeyAction { Type = "volume", Mode = "up", Scope = "app_volume" });
+
+        Assert.Equal(AppVolumeResult.NoAudio, Assert.Single(osd).Text);
+    }
+
+    [Fact]
+    public void OtherWindowsProblemsDontFallBack()
+    {
+        var audio = new FakeAppAudio(new AppVolumeResult("App Volume", null, null, "Couldn't reach Windows audio"));
+        var config = new AppConfig { FocusedAppNoAudioFallback = new TargetEntry { Scope = "system" } };
+        var (exec, _, _) = Executor(audio, config: config);
+
+        exec.Execute(new HotkeyAction { Type = "volume", Mode = "up", Scope = "app_volume" });
+
+        Assert.Equal(["app"], audio.Scopes);
+    }
+
+    // ─── Plain titles ───────────────────────────────────────────────────────────
+
+    [Fact]
+    public void AChannelInAllMixesIsJustTheChannelName()
+    {
+        var state = Of(new TargetEntry { Id = "a", ChannelId = "music" });
+        var (exec, _, osd) = Executor(state: state);
+
+        exec.Execute(new HotkeyAction { Type = "target", Mode = "select", TargetId = "a" });
+
+        Assert.Equal("Music", Assert.Single(osd).Text);
     }
 
     [Theory]
-    [InlineData("mute", Muted, "Muted")]
-    [InlineData("unmute", Up, "Unmuted")]
-    public void MuteTitlesUseTheMutedSpeaker(string mode, string emoji, string text)
+    [InlineData("volume", "up", null, 60)]
+    [InlineData("mute", "mute", "Muted", null)]
+    public void TitlesAreJustTheName(string type, string mode, string? text, int? level)
     {
         var (exec, _, osd) = Executor();
-        exec.Execute(new HotkeyAction { Type = "mute", Mode = mode, ChannelId = "music" });
-        Assert.Equal(new OsdMessage($"{emoji} Music", text, null), Assert.Single(osd));
+        exec.Execute(new HotkeyAction { Type = type, Mode = mode, ChannelId = "music", Step = 10 });
+        Assert.Equal(new OsdMessage("Music", text, level), Assert.Single(osd));
     }
 
     // ─── Target While Held availability ─────────────────────────────────────────
