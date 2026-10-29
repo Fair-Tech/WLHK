@@ -7,6 +7,7 @@ Built by FairTech.
 WLHK is a single native executable (C# / .NET Native AOT): one process, around 10 MB of RAM at idle, no runtime to install, and nothing extracted to `%TEMP%`. Keystrokes are handled in-process by a low-level keyboard hook.
 
 ## Features
+
 - **Per-key trigger customization:** tap, hold (configurable duration), and double-press actions on any key or combo. Hold actions can repeat while the key is held, at a configurable interval.
 - **Left/right modifiers:** optionally bind `LSHIFT+H` and `RSHIFT+H` to different actions; hotkeys recorded without a side keep matching either.
 - **System-wide detection:** low-level OS keyboard hook - works regardless of app focus, bypassing Elgato's software limitations.
@@ -25,10 +26,12 @@ WLHK is a single native executable (C# / .NET Native AOT): one process, around 1
 - **Config upgrades:** configs from older versions, including the original Electron app, are picked up and converted automatically.
 
 ## Requirements
+
 - Windows 10/11 (x64)
 - Elgato Wave Link 3.x
 
 ## Building
+
 - .NET 10 SDK
 - Visual Studio 2022+ with the "Desktop development with C++" workload (the Native AOT linker needs MSVC)
 
@@ -39,6 +42,7 @@ For development: `dotnet run` inside `src/` (JIT mode, no MSVC needed).
 Run **`Build-Test.bat`** (or `dotnet test WLHK.slnx`) for the test suite.
 
 ## Usage
+
 The app lives in your system tray. Double-click the tray icon to open the configuration window; right-click for quick toggles (hotkeys, OSD), reconnect, and quit.
 
 Click **Record New Hotkey**, press the key or combo you want, then enable and configure any of the three triggers (Normal Press / Hold / Double Press) on its card.
@@ -96,8 +100,9 @@ Media actions (Play / Pause, Next, Previous, Stop, System Volume Up/Down/Mute) p
 > **Note on Antivirus:** the global keyboard hook (`SetWindowsHookEx`) can trigger false positives in some AV products. The source is open for inspection; add an exclusion if needed.
 
 ## Credits, Acknowledgments, & Disclaimers
+
 The Wave Link WebSocket protocol handling was originally based on [node-wave-link-sdk](https://github.com/DarrellVS/node-wave-link-sdk) by [@darrellvs](https://github.com/darrellvs) - the current native client is a from-scratch implementation of the same protocol, and that library's existence made this project dramatically easier to build.
 
 This utility is not affiliated with, endorsed by, or sponsored by Elgato or Corsair. Elgato and Wave Link are trademarks of their respective owners. I just don't like how they lock down their ecosystem. (But opening Wave Link software for any mic is a HUGE step in the right direction! Thanks Elgato!)
 
-This utility is built with minimal AI input, generally limited to auto-completion, commit descriptions, and automated debugging processes. No "Make No Mistakes" here, there will be plenty of them.
+This utility is built with minimal AI input, generally limited to auto-completion, commit descriptions, and automated debugging processes. No "Make No Mistakes" here, there will be plenty of them. Contributions may use AI, but please mark them as such. 
