@@ -31,6 +31,8 @@ public static class ActionCatalog
     public const string ScopeFocusedApp = "focused_app";
     public const string ScopeMix = "mix";
     public const string ScopeOutput = "output";
+    /// <summary>Whichever output device is Wave Link's main output when the action runs.</summary>
+    public const string ScopeMainOutput = "main_output";
     /// <summary>The focused app's own volume, as in the Windows Volume Mixer.</summary>
     public const string ScopeAppVolume = "app_volume";
     /// <summary>The default Windows playback device ("Native Volume Controls").</summary>

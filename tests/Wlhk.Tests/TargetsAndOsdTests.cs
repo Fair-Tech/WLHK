@@ -309,6 +309,37 @@ public sealed class TargetsAndOsdTests
         Assert.Equal("Notepad isn't in a channel", Assert.Single(osd).Text);
     }
 
+    [Theory]
+    [InlineData("headphones", "Headphones")]
+    [InlineData("speakers", "Speakers")]
+    public void CurrentOutputFollowsTheMainOutput(string main, string expected)
+    {
+        var config = new AppConfig { FocusedAppNoAudioFallback = new TargetEntry { Scope = "main_output" } };
+        var (exec, wl, osd) = Executor(new FakeAppAudio(Silent), config: config);
+        wl.Outputs.Add(new OutputDevice { Id = "headphones", Name = "Headphones", Outputs = [new OutputPort { Id = "hp", Level = 0.5 }] });
+        wl.Outputs.Add(new OutputDevice { Id = "speakers", Name = "Speakers", Outputs = [new OutputPort { Id = "sp", Level = 0.5 }] });
+        wl.MainOutputId = main;
+
+        exec.Execute(new HotkeyAction { Type = "volume", Mode = "up", Scope = "app_volume", Step = 10 });
+
+        Assert.StartsWith($"setOutput {main}/", Assert.Single(wl.Writes));
+        Assert.Equal(new OsdMessage(expected, null, 60), Assert.Single(osd));
+    }
+
+    [Fact]
+    public void CurrentOutputWorksForTheChannelFallbackToo()
+    {
+        var config = new AppConfig { FocusedAppFallback = new TargetEntry { Scope = "main_output" } };
+        var (exec, wl, _) = Executor(config: config);
+        wl.Outputs.Add(new OutputDevice { Id = "speakers", Name = "Speakers", Outputs = [new OutputPort { Id = "sp", Level = 0.5 }] });
+        wl.MainOutputId = "speakers";
+        wl.Focused = new FocusedApp { Id = "Notepad", Name = "Notepad", ChannelId = null };
+
+        exec.Execute(new HotkeyAction { Type = "mute", Mode = "mute", Scope = "focused_app" });
+
+        Assert.Equal("setOutput speakers/sp level= muted=True", Assert.Single(wl.Writes));
+    }
+
     [Fact]
     public void WithoutANoAudioFallbackItStillSaysSo()
     {

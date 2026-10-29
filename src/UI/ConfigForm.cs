@@ -40,6 +40,7 @@ public sealed class ConfigForm : Form
     private const string FocusedItem = "@focused";
     private const string AppVolumeItem = "@appvolume";
     private const string SystemItem = "@system";
+    private const string MainOutputItem = "@mainoutput";
 
     private static readonly (string Value, string Label)[] VolumeKeyModes =
         { ("windows", "Windows default"), ("wavelink", "Control the Active Target") };
@@ -1041,6 +1042,7 @@ public sealed class ConfigForm : Form
         ScopeFocusedApp => FocusedItem,
         ScopeAppVolume => AppVolumeItem,
         ScopeSystem => SystemItem,
+        ScopeMainOutput => MainOutputItem,
         ScopeMix => mixId is null ? null : "m|" + mixId,
         ScopeOutput => deviceId is null ? null : "o|" + deviceId,
         _ => channelId is null ? null : "c|" + channelId
@@ -1052,6 +1054,7 @@ public sealed class ConfigForm : Form
         if (id == FocusedItem) return (ScopeFocusedApp, null);
         if (id == AppVolumeItem) return (ScopeAppVolume, null);
         if (id == SystemItem) return (ScopeSystem, null);
+        if (id == MainOutputItem) return (ScopeMainOutput, null);
         if (id.StartsWith("m|", StringComparison.Ordinal)) return (ScopeMix, id[2..]);
         if (id.StartsWith("o|", StringComparison.Ordinal)) return (ScopeOutput, id[2..]);
         if (id.StartsWith("c|", StringComparison.Ordinal)) return (ScopeChannel, id[2..]);
@@ -1351,6 +1354,9 @@ public sealed class ConfigForm : Form
             panel.Controls.Add(new Label { Text = label, Location = new Point(16, y + 4), AutoSize = true });
             var items = new List<ComboItem> { new("", "Nothing (show a message)") };
             items.AddRange(TargetItems(includeActive: false, channelsOnly: false).Where(item => item.Id != excludeItem));
+            // Ahead of the specific devices: follows whichever one is the main output.
+            int firstOutput = items.FindIndex(item => item.Id?.StartsWith("o|", StringComparison.Ordinal) == true);
+            items.Insert(firstOutput < 0 ? items.Count : firstOutput, new(MainOutputItem, "Output: Current Device"));
             var current = get();
             var dd = TargetDropdown(items,
                 current is null ? "" : EncodeTarget(ScopeOf(current), current.ChannelId, current.MixId, current.DeviceId),
@@ -1449,6 +1455,7 @@ public sealed class ConfigForm : Form
         ScopeFocusedApp => "Focused App's Channel",
         ScopeAppVolume => "Focused App's Volume",
         ScopeSystem => "Native Volume Controls",
+        ScopeMainOutput => "Output: Current Device",
         ScopeMix => $"Mix: {_wl.GetMixById(entry.MixId)?.Name ?? "(unavailable)"}",
         ScopeOutput => $"Output: {_wl.GetOutputDeviceById(entry.DeviceId)?.Name ?? "(unavailable)"}",
         _ => (_wl.GetChannelById(entry.ChannelId)?.Name ?? (entry.ChannelId is null ? "(no channel)" : "(unavailable)"))

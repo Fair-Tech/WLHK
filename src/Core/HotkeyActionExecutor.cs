@@ -160,14 +160,18 @@ public sealed class HotkeyActionExecutor
             string fallbackScope = fallback is null ? "" : ScopeOf(fallback);
             if (fallback is not null && fallbackScope is not (ScopeActive or ScopeFocusedApp) &&
                 !(context.Redirect is not null && fallbackScope == ScopeAppVolume))
-                return new Aim(fallbackScope, fallback.ChannelId, fallback.MixId, fallback.DeviceId);
+                return Concrete(new Aim(fallbackScope, fallback.ChannelId, fallback.MixId, fallback.DeviceId));
 
             osd.Show("Focused App", app is null ? "No focused app" : $"{app.Name} isn't in a channel", null);
             return null;
         }
 
-        return new Aim(scope, channelId, mixId, deviceId);
+        return Concrete(new Aim(scope, channelId, mixId, deviceId));
     }
+
+    /// <summary>"Current output" becomes the device that's the main output right now.</summary>
+    private Aim Concrete(Aim aim) =>
+        aim.Scope == ScopeMainOutput ? aim with { Scope = ScopeOutput, DeviceId = _wl.MainOutputId } : aim;
 
     /// <summary>"Browser", "Browser · Stream Mix", "Mix: Stream Mix", ... tolerant of things that have gone away.</summary>
     public string DescribeTarget(TargetEntry entry) => ScopeOf(entry) switch
@@ -175,6 +179,7 @@ public sealed class HotkeyActionExecutor
         ScopeFocusedApp => "Focused App's Channel",
         ScopeAppVolume => "Focused App's Volume",
         ScopeSystem => "Native Volume Controls",
+        ScopeMainOutput => "Output: Current Device",
         ScopeMix => $"Mix: {_wl.GetMixById(entry.MixId)?.Name ?? entry.MixId ?? "(none)"}",
         ScopeOutput => $"Output: {_wl.GetOutputDeviceById(entry.DeviceId)?.Name ?? entry.DeviceId ?? "(none)"}",
         _ => (_wl.GetChannelById(entry.ChannelId)?.Name ?? entry.ChannelId ?? "(none)") +
