@@ -562,7 +562,7 @@ public sealed class ConfigForm : Form
         // Mute, Volume and Effect share a target, so moving between them keeps it,
         // except that effects only exist on channels.
         if (!IsScoped(kind)) action.Scope = null;
-        if (kind == Effect && action.Scope is ScopeMix or ScopeOutput) action.Scope = null;
+        if (kind == Effect && action.Scope is ScopeMix or ScopeOutput or ScopeMainOutput) action.Scope = null;
         if (!IsScoped(kind) && kind != RouteApp) action.ChannelId = null;
         if (!IsScoped(kind) || kind == Effect || ScopeOf(action) is not (ScopeChannel or ScopeMix)) action.MixId = null;
         bool keepsDevice = kind is SwitchOutput or CycleOutput || (IsScoped(kind) && ScopeOf(action) == ScopeOutput);
@@ -785,7 +785,8 @@ public sealed class ConfigForm : Form
             _tips.SetToolTip(dd, "Active Target follows the active entry in Global Settings. "
                 + "Focused App's Channel is the Wave Link channel of whichever app has focus; "
                 + "Focused App's Volume is that app's own volume, as in the Windows Volume Mixer. "
-                + "Native Volume Controls is the default Windows playback device.");
+                + "Native Volume Controls is the default Windows playback device. "
+                + "Output: Current Device is whichever output is Wave Link's main output at the time.");
             row.Controls.Add(dd);
             x += 195;
 
@@ -1030,6 +1031,8 @@ public sealed class ConfigForm : Form
         if (!channelsOnly)
         {
             items.AddRange(_wl.GetMixes().Select(m => new ComboItem("m|" + m.Id, "Mix: " + m.Name)));
+            // Ahead of the specific devices: follows whichever one is the main output.
+            items.Add(new(MainOutputItem, "Output: Current Device"));
             items.AddRange(_wl.GetOutputDevices().Where(d => d.Outputs.Count > 0)
                 .Select(d => new ComboItem("o|" + d.Id, "Output: " + d.Name)));
         }
@@ -1354,9 +1357,6 @@ public sealed class ConfigForm : Form
             panel.Controls.Add(new Label { Text = label, Location = new Point(16, y + 4), AutoSize = true });
             var items = new List<ComboItem> { new("", "Nothing (show a message)") };
             items.AddRange(TargetItems(includeActive: false, channelsOnly: false).Where(item => item.Id != excludeItem));
-            // Ahead of the specific devices: follows whichever one is the main output.
-            int firstOutput = items.FindIndex(item => item.Id?.StartsWith("o|", StringComparison.Ordinal) == true);
-            items.Insert(firstOutput < 0 ? items.Count : firstOutput, new(MainOutputItem, "Output: Current Device"));
             var current = get();
             var dd = TargetDropdown(items,
                 current is null ? "" : EncodeTarget(ScopeOf(current), current.ChannelId, current.MixId, current.DeviceId),

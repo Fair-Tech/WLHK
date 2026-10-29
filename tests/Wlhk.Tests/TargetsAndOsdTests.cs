@@ -341,6 +341,19 @@ public sealed class TargetsAndOsdTests
     }
 
     [Fact]
+    public void CurrentOutputAsAnActiveTargetEntry()
+    {
+        var state = Of(new TargetEntry { Id = "a", Scope = "main_output" });
+        var (exec, wl, _) = Executor(state: state);
+        wl.Outputs.Add(new OutputDevice { Id = "speakers", Name = "Speakers", Outputs = [new OutputPort { Id = "sp", Level = 0.5 }] });
+        wl.MainOutputId = "speakers";
+
+        exec.Execute(new HotkeyAction { Type = "mute", Mode = "mute", Scope = "active" });
+
+        Assert.Equal("setOutput speakers/sp level= muted=True", Assert.Single(wl.Writes));
+    }
+
+    [Fact]
     public void WithoutANoAudioFallbackItStillSaysSo()
     {
         var (exec, _, osd) = Executor(new FakeAppAudio(Silent));
